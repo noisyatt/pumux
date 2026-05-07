@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PATH="/opt/homebrew/opt/zig@0.15/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 APP_NAME="cmux DEV"
 BUNDLE_ID="com.cmuxterm.app.debug"
 BASE_APP_NAME="cmux DEV"

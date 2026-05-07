@@ -10382,6 +10382,21 @@ enum DevBuildBannerDebugSettings {
         }
         return defaults.bool(forKey: sidebarBannerVisibleKey)
     }
+
+    static func labelText(
+        now: Date = Date(),
+        calendar: Calendar = .current,
+        bundle: Bundle = .main
+    ) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: now)
+        let year = (components.year ?? 0) % 100
+        let month = components.month ?? 0
+        let day = components.day ?? 0
+        let build = (bundle.infoDictionary?["CFBundleVersion"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffix = build?.isEmpty == false ? build! : "00"
+        return String(format: "dev.ver. %02d.%02d%02d.%@", year, month, day, suffix)
+    }
 }
 
 private enum FeedbackComposerSettings {
@@ -12385,9 +12400,9 @@ private struct SidebarDevFooter: View {
         VStack(alignment: .leading, spacing: 6) {
             SidebarFooterButtons(updateViewModel: updateViewModel, fileExplorerState: fileExplorerState, onSendFeedback: onSendFeedback)
             if showSidebarDevBuildBanner {
-                Text(String(localized: "debug.devBuildBanner.title", defaultValue: "THIS IS A DEV BUILD"))
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.red)
+                Text(DevBuildBannerDebugSettings.labelText())
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundColor(.black)
             }
         }
         .padding(.leading, 6)

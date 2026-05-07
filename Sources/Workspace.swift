@@ -378,6 +378,7 @@ extension Workspace {
 
         let panelTitle = panelTitle(panelId: panelId)
         let customTitle = panelCustomTitles[panelId]
+        let customColor = panelCustomColors[panelId]
         let directory: String? = {
             if let directory = panelDirectories[panelId]?.trimmingCharacters(in: .whitespacesAndNewlines),
                !directory.isEmpty {
@@ -485,6 +486,7 @@ extension Workspace {
             type: panel.panelType,
             title: panelTitle,
             customTitle: customTitle,
+            customColor: customColor,
             directory: directory,
             isPinned: isPinned,
             isManuallyUnread: isManuallyUnread,
@@ -830,6 +832,7 @@ extension Workspace {
         }
 
         setPanelCustomTitle(panelId: panelId, title: snapshot.customTitle)
+        setPanelCustomColor(panelId: panelId, color: snapshot.customColor)
         setPanelPinned(panelId: panelId, pinned: snapshot.isPinned)
 
         if snapshot.isManuallyUnread {
@@ -7193,6 +7196,7 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var panelDirectories: [UUID: String] = [:]
     @Published var panelTitles: [UUID: String] = [:]
     @Published private(set) var panelCustomTitles: [UUID: String] = [:]
+    @Published private(set) var panelCustomColors: [UUID: String] = [:]
     @Published private(set) var pinnedPanelIds: Set<UUID> = []
     @Published private(set) var manualUnreadPanelIds: Set<UUID> = []
     @Published private(set) var tmuxLayoutSnapshot: LayoutSnapshot?
@@ -8321,6 +8325,32 @@ final class Workspace: Identifiable, ObservableObject {
         )
     }
 
+    func setPanelCustomColor(panelId: UUID, color: String?) {
+        guard panels[panelId] != nil else { return }
+        let trimmed = color?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalized: String?
+        if trimmed.isEmpty {
+            normalized = nil
+        } else {
+            guard let resolved = WorkspaceTabColorSettings.resolvedColorHex(trimmed) else { return }
+            normalized = resolved
+        }
+        let previous = panelCustomColors[panelId]
+        if let normalized {
+            guard previous != normalized else { return }
+            panelCustomColors[panelId] = normalized
+        } else {
+            guard previous != nil else { return }
+            panelCustomColors.removeValue(forKey: panelId)
+        }
+
+        guard let tabId = surfaceIdFromPanelId(panelId) else { return }
+        bonsplitController.updateTab(
+            tabId,
+            customColorHex: .some(normalized)
+        )
+    }
+
     func isPanelPinned(_ panelId: UUID) -> Bool {
         pinnedPanelIds.contains(panelId)
     }
@@ -8781,6 +8811,7 @@ final class Workspace: Identifiable, ObservableObject {
         panelDirectories = panelDirectories.filter { validSurfaceIds.contains($0.key) }
         panelTitles = panelTitles.filter { validSurfaceIds.contains($0.key) }
         panelCustomTitles = panelCustomTitles.filter { validSurfaceIds.contains($0.key) }
+        panelCustomColors = panelCustomColors.filter { validSurfaceIds.contains($0.key) }
         pinnedPanelIds = pinnedPanelIds.filter { validSurfaceIds.contains($0) }
         manualUnreadPanelIds = manualUnreadPanelIds.filter { validSurfaceIds.contains($0) }
         panelGitBranches = panelGitBranches.filter { validSurfaceIds.contains($0.key) }
@@ -11112,6 +11143,11 @@ final class Workspace: Identifiable, ObservableObject {
         if let customTitle = detached.customTitle {
             panelCustomTitles[detached.panelId] = customTitle
         }
+        if let customColor = detached.customColor {
+            panelCustomColors[detached.panelId] = customColor
+        } else {
+            panelCustomColors.removeValue(forKey: detached.panelId)
+        }
         if detached.isPinned {
             pinnedPanelIds.insert(detached.panelId)
         } else {
@@ -11134,6 +11170,7 @@ final class Workspace: Identifiable, ObservableObject {
             isDirty: detached.panel.isDirty,
             isLoading: detached.isLoading,
             isPinned: detached.isPinned,
+            customColorHex: detached.customColor,
             inPane: paneId
         ) else {
             removeBrowserOpenTabSuggestionIfNeeded(panel: detached.panel, panelId: detached.panelId)
@@ -11143,6 +11180,7 @@ final class Workspace: Identifiable, ObservableObject {
             syncRemotePortScanTTYs()
             panelTitles.removeValue(forKey: detached.panelId)
             panelCustomTitles.removeValue(forKey: detached.panelId)
+            panelCustomColors.removeValue(forKey: detached.panelId)
             pinnedPanelIds.remove(detached.panelId)
             manualUnreadPanelIds.remove(detached.panelId)
             manualUnreadMarkedAt.removeValue(forKey: detached.panelId)
@@ -12456,6 +12494,30 @@ final class Workspace: Identifiable, ObservableObject {
         setPanelCustomTitle(panelId: panelId, title: input.stringValue)
     }
 
+    private func promptSetPanelColor(tabId: TabID) {
+        guard let panelId = panelIdFromSurfaceId(tabId),
+              panels[panelId] != nil else { return }
+
+        let alert = NSAlert()
+        alert.messageText = String(localized: "alert.tabColor.title", defaultValue: "Tab Color")
+        alert.informativeText = String(localized: "alert.tabColor.message", defaultValue: "Enter a color name or #RRGGBB value for this tab.")
+        let input = NSTextField(string: panelCustomColors[panelId] ?? "")
+        input.placeholderString = String(localized: "alert.tabColor.placeholder", defaultValue: "blue or #4A90E2")
+        input.frame = NSRect(x: 0, y: 0, width: 240, height: 22)
+        alert.accessoryView = input
+        alert.addButton(withTitle: String(localized: "alert.tabColor.apply", defaultValue: "Apply"))
+        alert.addButton(withTitle: String(localized: "alert.cancel", defaultValue: "Cancel"))
+        let alertWindow = alert.window
+        alertWindow.initialFirstResponder = input
+        DispatchQueue.main.async {
+            alertWindow.makeFirstResponder(input)
+            input.selectText(nil)
+        }
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        setPanelCustomColor(panelId: panelId, color: input.stringValue)
+    }
+
     private static let bonsplitMoveNewWorkspaceDestinationId = "new-workspace"
     private static let bonsplitMoveExistingWorkspacePrefix = "workspace:"
 
@@ -13334,6 +13396,7 @@ extension Workspace: BonsplitDelegate {
                 ttyName: surfaceTTYNames[panelId],
                 cachedTitle: cachedTitle,
                 customTitle: panelCustomTitles[panelId],
+                customColor: panelCustomColors[panelId],
                 manuallyUnread: manualUnreadPanelIds.contains(panelId),
                 isRemoteTerminal: activeRemoteTerminalSurfaceIds.contains(panelId),
                 remoteRelayPort: activeRemoteTerminalSurfaceIds.contains(panelId)
@@ -13358,6 +13421,7 @@ extension Workspace: BonsplitDelegate {
         panelPullRequests.removeValue(forKey: panelId)
         panelTitles.removeValue(forKey: panelId)
         panelCustomTitles.removeValue(forKey: panelId)
+        panelCustomColors.removeValue(forKey: panelId)
         pinnedPanelIds.remove(panelId)
         manualUnreadPanelIds.remove(panelId)
         manualUnreadMarkedAt.removeValue(forKey: panelId)
@@ -13534,6 +13598,7 @@ extension Workspace: BonsplitDelegate {
                 panelPullRequests.removeValue(forKey: panelId)
                 panelTitles.removeValue(forKey: panelId)
                 panelCustomTitles.removeValue(forKey: panelId)
+                panelCustomColors.removeValue(forKey: panelId)
                 pinnedPanelIds.remove(panelId)
                 manualUnreadPanelIds.remove(panelId)
                 panelSubscriptions.removeValue(forKey: panelId)
@@ -13904,6 +13969,11 @@ extension Workspace: BonsplitDelegate {
         case .clearName:
             guard let panelId = panelIdFromSurfaceId(tab.id) else { return }
             setPanelCustomTitle(panelId: panelId, title: nil)
+        case .setColor:
+            promptSetPanelColor(tabId: tab.id)
+        case .clearColor:
+            guard let panelId = panelIdFromSurfaceId(tab.id) else { return }
+            setPanelCustomColor(panelId: panelId, color: nil)
         case .copyIdentifiers:
             guard let panelId = panelIdFromSurfaceId(tab.id) else { return }
             copyIdentifiersToPasteboard(surfaceId: panelId)

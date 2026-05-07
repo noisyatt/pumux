@@ -49,9 +49,14 @@ select_zig_for_target() {
 
   local -a candidates=()
   local path_zig=""
+  candidates+=(
+    "/opt/homebrew/opt/zig@0.15/bin/zig"
+    "/usr/local/opt/zig@0.15/bin/zig"
+    "/opt/homebrew/bin/zig"
+    "/usr/local/bin/zig"
+  )
   path_zig="$(command -v zig 2>/dev/null || true)"
   [[ -n "$path_zig" ]] && candidates+=("$path_zig")
-  candidates+=("/opt/homebrew/bin/zig" "/usr/local/bin/zig")
 
   local fallback=""
   local seen=" "

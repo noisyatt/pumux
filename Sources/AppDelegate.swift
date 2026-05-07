@@ -2661,7 +2661,161 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard let snapshot = SessionPersistenceStore.loadReopenSessionSnapshot() else {
             return false
         }
+        return restoreSessionSnapshot(snapshot, shouldActivate: shouldActivate, isManualReopen: true)
+    }
 
+    func saveSessionProfile(name: String, includeScrollback: Bool = false) -> Bool {
+        guard SessionProfileStore.validateName(name) != nil,
+              let snapshot = buildSessionSnapshot(includeScrollback: includeScrollback) else {
+            return false
+        }
+        return SessionProfileStore.save(snapshot, name: name)
+    }
+
+    func listSessionProfiles() -> [SessionProfileInfo] {
+        SessionProfileStore.list()
+    }
+
+    func deleteSessionProfile(name: String) -> Bool {
+        SessionProfileStore.delete(name: name)
+    }
+
+    func promptSaveSessionProfile() {
+        let alert = NSAlert()
+        alert.messageText = String(localized: "dialog.sessionProfile.save.title", defaultValue: "Save Session Profile")
+        alert.informativeText = String(
+            localized: "dialog.sessionProfile.save.message",
+            defaultValue: "Save the current windows, workspaces, tabs, splits, and panel state as a named profile."
+        )
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let input = NSTextField(string: "")
+        input.placeholderString = String(localized: "dialog.sessionProfile.name.placeholder", defaultValue: "Profile name")
+        input.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        stack.addArrangedSubview(input)
+
+        let includeScrollback = NSButton(
+            checkboxWithTitle: String(localized: "dialog.sessionProfile.includeScrollback", defaultValue: "Include terminal scrollback"),
+            target: nil,
+            action: nil
+        )
+        includeScrollback.state = .off
+        stack.addArrangedSubview(includeScrollback)
+
+        alert.accessoryView = stack
+        alert.addButton(withTitle: String(localized: "common.save", defaultValue: "Save"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+
+        let alertWindow = alert.window
+        alertWindow.initialFirstResponder = input
+        DispatchQueue.main.async {
+            alertWindow.makeFirstResponder(input)
+        }
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard SessionProfileStore.validateName(name) != nil else {
+            showSessionProfileMessage(
+                title: String(localized: "dialog.sessionProfile.invalidName.title", defaultValue: "Invalid Profile Name"),
+                message: String(
+                    localized: "dialog.sessionProfile.invalidName.message",
+                    defaultValue: "Use only letters, numbers, dots, dashes, and underscores."
+                ),
+                style: .warning
+            )
+            return
+        }
+
+        if saveSessionProfile(name: name, includeScrollback: includeScrollback.state == .on) {
+            showSessionProfileMessage(
+                title: String(localized: "dialog.sessionProfile.saved.title", defaultValue: "Session Profile Saved"),
+                message: String(localized: "dialog.sessionProfile.saved.message", defaultValue: "Saved profile '\(name)'."),
+                style: .informational
+            )
+        } else {
+            showSessionProfileMessage(
+                title: String(localized: "dialog.sessionProfile.saveFailed.title", defaultValue: "Could Not Save Profile"),
+                message: String(localized: "dialog.sessionProfile.saveFailed.message", defaultValue: "cmux could not save the current session profile."),
+                style: .warning
+            )
+        }
+    }
+
+    func confirmLoadSessionProfile(name: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(localized: "dialog.sessionProfile.load.title", defaultValue: "Load Session Profile?")
+        alert.informativeText = String(
+            localized: "dialog.sessionProfile.load.message",
+            defaultValue: "This will replace the current cmux windows and workspaces with profile '\(name)'."
+        )
+        alert.addButton(withTitle: String(localized: "dialog.sessionProfile.load.button", defaultValue: "Load"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        if !loadSessionProfile(name: name) {
+            showSessionProfileMessage(
+                title: String(localized: "dialog.sessionProfile.loadFailed.title", defaultValue: "Could Not Load Profile"),
+                message: String(localized: "dialog.sessionProfile.loadFailed.message", defaultValue: "No session profile named '\(name)' was found."),
+                style: .warning
+            )
+        }
+    }
+
+    func confirmDeleteSessionProfile(name: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(localized: "dialog.sessionProfile.delete.title", defaultValue: "Delete Session Profile?")
+        alert.informativeText = String(
+            localized: "dialog.sessionProfile.delete.message",
+            defaultValue: "Delete profile '\(name)'? This cannot be undone."
+        )
+        alert.addButton(withTitle: String(localized: "common.delete", defaultValue: "Delete"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        if !deleteSessionProfile(name: name) {
+            showSessionProfileMessage(
+                title: String(localized: "dialog.sessionProfile.deleteFailed.title", defaultValue: "Could Not Delete Profile"),
+                message: String(localized: "dialog.sessionProfile.deleteFailed.message", defaultValue: "No session profile named '\(name)' was found."),
+                style: .warning
+            )
+        }
+    }
+
+    func revealSessionProfilesFolder() {
+        guard let directory = SessionProfileStore.profilesDirectoryURL() else { return }
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([directory])
+    }
+
+    private func showSessionProfileMessage(title: String, message: String, style: NSAlert.Style) {
+        let alert = NSAlert()
+        alert.alertStyle = style
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: String(localized: "common.ok", defaultValue: "OK"))
+        _ = alert.runModal()
+    }
+
+    @discardableResult
+    func loadSessionProfile(name: String, shouldActivate: Bool = true) -> Bool {
+        guard let snapshot = SessionProfileStore.load(name: name) else {
+            return false
+        }
+        return restoreSessionSnapshot(snapshot, shouldActivate: shouldActivate, isManualReopen: true)
+    }
+
+    @discardableResult
+    private func restoreSessionSnapshot(
+        _ snapshot: AppSessionSnapshot,
+        shouldActivate: Bool,
+        isManualReopen: Bool
+    ) -> Bool {
         let snapshotWindows = Array(
             snapshot.windows.prefix(SessionPersistencePolicy.maxWindowsPerSnapshot)
         )
@@ -2704,7 +2858,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         }
 
-        completeSessionRestoreOperation(isManualReopen: true)
+        completeSessionRestoreOperation(isManualReopen: isManualReopen)
 
         if shouldActivate,
            let primaryWindow = sortedMainWindowContextsForSessionSnapshot()

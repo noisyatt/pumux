@@ -250,6 +250,7 @@ struct SessionPanelSnapshot: Codable, Sendable {
     var type: PanelType
     var title: String?
     var customTitle: String?
+    var customColor: String?
     var directory: String?
     var isPinned: Bool
     var isManuallyUnread: Bool
@@ -476,6 +477,107 @@ enum SessionPersistenceStore {
         return resolvedAppSupport
             .appendingPathComponent("cmux", isDirectory: true)
             .appendingPathComponent("session-\(safeBundleId)\(suffix).json", isDirectory: false)
+    }
+}
+
+struct SessionProfileInfo: Sendable {
+    var name: String
+    var createdAt: TimeInterval
+    var windowCount: Int
+    var workspaceCount: Int
+}
+
+enum SessionProfileStore {
+    static let allowedNameDescription = "letters, numbers, dots, dashes, and underscores"
+
+    static func validateName(_ rawName: String) -> String? {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        guard name.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        guard name != "." && name != ".." else { return nil }
+        return name
+    }
+
+    static func save(_ snapshot: AppSessionSnapshot, name rawName: String) -> Bool {
+        guard let name = validateName(rawName),
+              let fileURL = profileFileURL(name: name) else {
+            return false
+        }
+        return SessionPersistenceStore.save(snapshot, fileURL: fileURL)
+    }
+
+    static func load(name rawName: String) -> AppSessionSnapshot? {
+        guard let name = validateName(rawName),
+              let fileURL = profileFileURL(name: name) else {
+            return nil
+        }
+        return SessionPersistenceStore.load(fileURL: fileURL)
+    }
+
+    static func delete(name rawName: String) -> Bool {
+        guard let name = validateName(rawName),
+              let fileURL = profileFileURL(name: name) else {
+            return false
+        }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return false }
+        do {
+            try FileManager.default.removeItem(at: fileURL)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    static func list() -> [SessionProfileInfo] {
+        guard let directory = profilesDirectoryURL(),
+              let fileURLs = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+              ) else {
+            return []
+        }
+
+        return fileURLs
+            .filter { $0.pathExtension == "json" }
+            .compactMap { fileURL -> SessionProfileInfo? in
+                let name = fileURL.deletingPathExtension().lastPathComponent
+                guard validateName(name) != nil,
+                      let snapshot = SessionPersistenceStore.load(fileURL: fileURL) else {
+                    return nil
+                }
+                let workspaceCount = snapshot.windows.reduce(0) { total, window in
+                    total + window.tabManager.workspaces.count
+                }
+                return SessionProfileInfo(
+                    name: name,
+                    createdAt: snapshot.createdAt,
+                    windowCount: snapshot.windows.count,
+                    workspaceCount: workspaceCount
+                )
+            }
+            .sorted { lhs, rhs in
+                lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+    }
+
+    static func profileFileURL(name rawName: String) -> URL? {
+        guard let name = validateName(rawName),
+              let directory = profilesDirectoryURL() else {
+            return nil
+        }
+        return directory.appendingPathComponent("\(name).json", isDirectory: false)
+    }
+
+    static func profilesDirectoryURL() -> URL? {
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        return appSupport
+            .appendingPathComponent("cmux", isDirectory: true)
+            .appendingPathComponent("session-profiles", isDirectory: true)
     }
 }
 

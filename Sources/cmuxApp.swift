@@ -550,6 +550,48 @@ struct cmuxApp: App {
                     }
                 }
 
+                Menu(String(localized: "menu.file.sessionProfiles", defaultValue: "Session Profiles")) {
+                    Button(String(localized: "menu.file.sessionProfiles.save", defaultValue: "Save Current Profile…")) {
+                        AppDelegate.shared?.promptSaveSessionProfile()
+                    }
+
+                    Divider()
+
+                    let profiles = SessionProfileStore.list()
+
+                    Menu(String(localized: "menu.file.sessionProfiles.load", defaultValue: "Load Profile")) {
+                        if profiles.isEmpty {
+                            Button(String(localized: "menu.file.sessionProfiles.empty", defaultValue: "No Profiles")) {}
+                                .disabled(true)
+                        } else {
+                            ForEach(profiles, id: \.name) { profile in
+                                Button(profile.name) {
+                                    AppDelegate.shared?.confirmLoadSessionProfile(name: profile.name)
+                                }
+                            }
+                        }
+                    }
+
+                    Menu(String(localized: "menu.file.sessionProfiles.delete", defaultValue: "Delete Profile")) {
+                        if profiles.isEmpty {
+                            Button(String(localized: "menu.file.sessionProfiles.empty", defaultValue: "No Profiles")) {}
+                                .disabled(true)
+                        } else {
+                            ForEach(profiles, id: \.name) { profile in
+                                Button(profile.name) {
+                                    AppDelegate.shared?.confirmDeleteSessionProfile(name: profile.name)
+                                }
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    Button(String(localized: "menu.file.sessionProfiles.reveal", defaultValue: "Reveal Profiles Folder")) {
+                        AppDelegate.shared?.revealSessionProfilesFolder()
+                    }
+                }
+
                 splitCommandButton(title: String(localized: "menu.file.reopenClosedBrowserPanel", defaultValue: "Reopen Closed Browser Panel"), shortcut: menuShortcut(for: .reopenClosedBrowserPanel)) {
                     _ = activeTabManager.reopenMostRecentlyClosedBrowserPanel()
                 }

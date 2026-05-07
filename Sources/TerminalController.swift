@@ -2448,6 +2448,14 @@ class TerminalController {
             return v2Result(id: id, self.v2WorkspaceRemoteTerminalSessionEnd(params: params))
         case "session.restore_previous":
             return v2Result(id: id, self.v2SessionRestorePrevious())
+        case "session.profile_save":
+            return v2Result(id: id, self.v2SessionProfileSave(params: params))
+        case "session.profile_list":
+            return v2Result(id: id, self.v2SessionProfileList())
+        case "session.profile_load":
+            return v2Result(id: id, self.v2SessionProfileLoad(params: params))
+        case "session.profile_delete":
+            return v2Result(id: id, self.v2SessionProfileDelete(params: params))
 
         // Settings
         case "settings.open":
@@ -5489,6 +5497,7 @@ class TerminalController {
 
         let supportedActions = [
             "rename", "clear_name",
+            "set_color", "clear_color",
             "close_left", "close_right", "close_others",
             "new_terminal_right", "new_browser_right",
             "reload", "duplicate", "move_to_new_workspace", "detach_to_workspace", "detach_to_new_workspace",
@@ -5596,6 +5605,21 @@ class TerminalController {
 
             case "clear_name":
                 workspace.setPanelCustomTitle(panelId: surfaceId, title: nil)
+                finish()
+
+            case "set_color":
+                guard let rawColor = v2String(params, "color"),
+                      let color = WorkspaceTabColorSettings.resolvedColorHex(rawColor) else {
+                    result = .err(code: "invalid_params", message: "Missing or invalid color", data: [
+                        "supported_formats": ["#RRGGBB", "RRGGBB", "palette color name"]
+                    ])
+                    return
+                }
+                workspace.setPanelCustomColor(panelId: surfaceId, color: color)
+                finish(["color": color])
+
+            case "clear_color":
+                workspace.setPanelCustomColor(panelId: surfaceId, color: nil)
                 finish()
 
             case "pin":
@@ -7946,6 +7970,85 @@ class TerminalController {
             )
         }
         return .ok(["restored": true])
+    }
+
+    private func v2SessionProfileSave(params: [String: Any]) -> V2CallResult {
+        guard let name = v2String(params, "name"),
+              SessionProfileStore.validateName(name) != nil else {
+            return .err(
+                code: "invalid_params",
+                message: "Profile name must contain only \(SessionProfileStore.allowedNameDescription)",
+                data: nil
+            )
+        }
+
+        let includeScrollback = v2Bool(params, "include_scrollback") ?? false
+        var saved = false
+        v2MainSync {
+            saved = AppDelegate.shared?.saveSessionProfile(
+                name: name,
+                includeScrollback: includeScrollback
+            ) ?? false
+        }
+        guard saved else {
+            return .err(code: "internal_error", message: "Failed to save session profile", data: ["name": name])
+        }
+        return .ok(["saved": true, "name": name])
+    }
+
+    private func v2SessionProfileList() -> V2CallResult {
+        var profiles: [[String: Any]] = []
+        v2MainSync {
+            profiles = AppDelegate.shared?.listSessionProfiles().map { profile in
+                [
+                    "name": profile.name,
+                    "created_at": profile.createdAt,
+                    "windows": profile.windowCount,
+                    "workspaces": profile.workspaceCount,
+                ]
+            } ?? []
+        }
+        return .ok(["profiles": profiles])
+    }
+
+    private func v2SessionProfileLoad(params: [String: Any]) -> V2CallResult {
+        guard let name = v2String(params, "name"),
+              SessionProfileStore.validateName(name) != nil else {
+            return .err(
+                code: "invalid_params",
+                message: "Profile name must contain only \(SessionProfileStore.allowedNameDescription)",
+                data: nil
+            )
+        }
+
+        var loaded = false
+        v2MainSync {
+            loaded = AppDelegate.shared?.loadSessionProfile(name: name, shouldActivate: false) ?? false
+        }
+        guard loaded else {
+            return .err(code: "not_found", message: "No session profile named '\(name)'", data: ["name": name])
+        }
+        return .ok(["loaded": true, "name": name])
+    }
+
+    private func v2SessionProfileDelete(params: [String: Any]) -> V2CallResult {
+        guard let name = v2String(params, "name"),
+              SessionProfileStore.validateName(name) != nil else {
+            return .err(
+                code: "invalid_params",
+                message: "Profile name must contain only \(SessionProfileStore.allowedNameDescription)",
+                data: nil
+            )
+        }
+
+        var deleted = false
+        v2MainSync {
+            deleted = AppDelegate.shared?.deleteSessionProfile(name: name) ?? false
+        }
+        guard deleted else {
+            return .err(code: "not_found", message: "No session profile named '\(name)'", data: ["name": name])
+        }
+        return .ok(["deleted": true, "name": name])
     }
 
     private func v2SettingsOpen(params: [String: Any]) -> V2CallResult {

@@ -14,6 +14,7 @@ extension Workspace {
         let ttyName: String?
         let cachedTitle: String?
         let customTitle: String?
+        let customColor: String?
         let manuallyUnread: Bool
         let isRemoteTerminal: Bool
         let remoteRelayPort: Int?
@@ -33,6 +34,7 @@ extension Workspace {
                 ttyName: ttyName,
                 cachedTitle: cachedTitle,
                 customTitle: customTitle,
+                customColor: customColor,
                 manuallyUnread: manuallyUnread,
                 isRemoteTerminal: isRemoteTerminal,
                 remoteRelayPort: remoteRelayPort,

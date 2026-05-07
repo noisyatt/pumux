@@ -2165,6 +2165,15 @@ struct CMUXCLI {
             )
             return
         }
+        if command == "profile" {
+            try runProfileCommand(
+                commandArgs: commandArgs,
+                socketPath: resolvedSocketPath,
+                explicitPassword: socketPasswordArg,
+                jsonOutput: jsonOutput
+            )
+            return
+        }
 
         if command == "feedback" {
             try runFeedback(
@@ -3790,6 +3799,151 @@ struct CMUXCLI {
         }
     }
 
+    private func runProfileCommand(
+        commandArgs: [String],
+        socketPath: String,
+        explicitPassword: String?,
+        jsonOutput: Bool
+    ) throws {
+        let args = commandArgs.filter { $0 != "--" }
+        guard let subcommand = args.first else {
+            throw CLIError(message: profileUsage())
+        }
+
+        let remaining = Array(args.dropFirst())
+        let initialClient = SocketClient(path: socketPath)
+        let client: SocketClient
+        let launched: Bool
+        if (try? initialClient.connect()) == nil {
+            initialClient.close()
+            try launchApp()
+            client = try SocketClient.waitForConnectableSocket(path: socketPath, timeout: 10)
+            launched = true
+        } else {
+            client = initialClient
+            launched = false
+        }
+
+        defer { client.close() }
+        try authenticateClientIfNeeded(
+            client,
+            explicitPassword: explicitPassword,
+            socketPath: socketPath
+        )
+
+        switch subcommand {
+        case "save":
+            let (name, includeScrollback) = try parseProfileSaveArgs(remaining)
+            var payload = try client.sendV2(
+                method: "session.profile_save",
+                params: [
+                    "name": name,
+                    "include_scrollback": includeScrollback,
+                ]
+            )
+            payload["launched"] = launched
+            printProfileCommandResult(payload, jsonOutput: jsonOutput, fallback: "Saved profile '\(name)'")
+        case "load":
+            let name = try parseSingleProfileName(remaining, command: "load")
+            var payload = try client.sendV2(method: "session.profile_load", params: ["name": name])
+            payload["launched"] = launched
+            printProfileCommandResult(payload, jsonOutput: jsonOutput, fallback: "Loaded profile '\(name)'")
+        case "delete", "rm":
+            let name = try parseSingleProfileName(remaining, command: subcommand)
+            var payload = try client.sendV2(method: "session.profile_delete", params: ["name": name])
+            payload["launched"] = launched
+            printProfileCommandResult(payload, jsonOutput: jsonOutput, fallback: "Deleted profile '\(name)'")
+        case "list", "ls":
+            if let unknown = remaining.first {
+                throw CLIError(message: "profile list: unknown argument '\(unknown)'")
+            }
+            let payload = try client.sendV2(method: "session.profile_list")
+            if jsonOutput {
+                print(jsonString(payload))
+            } else {
+                printProfileList(payload)
+            }
+        default:
+            throw CLIError(message: "profile: unknown subcommand '\(subcommand)'\n\n\(profileUsage())")
+        }
+    }
+
+    private func parseProfileSaveArgs(_ args: [String]) throws -> (name: String, includeScrollback: Bool) {
+        var includeScrollback = false
+        var names: [String] = []
+        var iterator = args.makeIterator()
+        while let arg = iterator.next() {
+            switch arg {
+            case "--include-scrollback":
+                includeScrollback = true
+            default:
+                if arg.hasPrefix("-") {
+                    throw CLIError(message: "profile save: unknown flag '\(arg)'")
+                }
+                names.append(arg)
+            }
+        }
+        guard names.count == 1, let name = names.first else {
+            throw CLIError(message: "Usage: cmux profile save <name> [--include-scrollback]")
+        }
+        return (name, includeScrollback)
+    }
+
+    private func parseSingleProfileName(_ args: [String], command: String) throws -> String {
+        guard args.count == 1, let name = args.first else {
+            throw CLIError(message: "Usage: cmux profile \(command) <name>")
+        }
+        return name
+    }
+
+    private func printProfileCommandResult(
+        _ payload: [String: Any],
+        jsonOutput: Bool,
+        fallback: String
+    ) {
+        if jsonOutput {
+            print(jsonString(payload))
+        } else {
+            print(fallback)
+        }
+    }
+
+    private func printProfileList(_ payload: [String: Any]) {
+        guard let profiles = payload["profiles"] as? [[String: Any]],
+              !profiles.isEmpty else {
+            print("No session profiles")
+            return
+        }
+
+        for profile in profiles {
+            let name = (profile["name"] as? String) ?? "(unknown)"
+            let windows = (profile["windows"] as? Int) ?? 0
+            let workspaces = (profile["workspaces"] as? Int) ?? 0
+            let createdAt = (profile["created_at"] as? Double).map { Date(timeIntervalSince1970: $0) }
+            let created = createdAt.map { Self.profileDateFormatter.string(from: $0) } ?? "unknown date"
+            print("\(name)\t\(windows) windows\t\(workspaces) workspaces\t\(created)")
+        }
+    }
+
+    private func profileUsage() -> String {
+        """
+        Usage:
+          cmux profile save <name> [--include-scrollback]
+          cmux profile list
+          cmux profile load <name>
+          cmux profile delete <name>
+
+        Profile names may contain letters, numbers, dots, dashes, and underscores.
+        """
+    }
+
+    private static let profileDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
     func connectClient(
         socketPath: String,
         explicitPassword: String?,
@@ -4493,9 +4647,10 @@ struct CMUXCLI {
         let (actionOpt, rem3) = parseOption(rem2, name: "--action")
         let (titleOpt, rem4) = parseOption(rem3, name: "--title")
         let (urlOpt, rem5) = parseOption(rem4, name: "--url")
-        let (focusOpt, rem6) = parseOption(rem5, name: "--focus")
+        let (colorOpt, rem6) = parseOption(rem5, name: "--color")
+        let (focusOpt, rem7) = parseOption(rem6, name: "--focus")
 
-        var positional = rem6
+        var positional = rem7
         let actionRaw: String
         if let actionOpt {
             actionRaw = actionOpt
@@ -4531,9 +4686,14 @@ struct CMUXCLI {
 
         let inferredTitle = positional.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         let title = (titleOpt ?? (inferredTitle.isEmpty ? nil : inferredTitle))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inferredColor = positional.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        let color = (colorOpt ?? (inferredColor.isEmpty ? nil : inferredColor))?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if action == "rename", (title?.isEmpty ?? true) {
             throw CLIError(message: "tab-action rename requires --title <text> (or a trailing title)")
+        }
+        if action == "set_color", (color?.isEmpty ?? true) {
+            throw CLIError(message: "tab-action set-color requires --color <name|#hex> (or a trailing color)")
         }
 
         var params: [String: Any] = ["action": action]
@@ -4546,6 +4706,9 @@ struct CMUXCLI {
         if let title, !title.isEmpty {
             params["title"] = title
         }
+        if let color, !color.isEmpty {
+            params["color"] = color
+        }
         if let urlOpt, !urlOpt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             params["url"] = urlOpt.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -4555,6 +4718,7 @@ struct CMUXCLI {
         if let tabHandle = formatTabHandle(payload, idFormat: idFormat) { summaryParts.append("tab=\(tabHandle)") }
         if let workspaceHandle = formatHandle(payload, kind: "workspace", idFormat: idFormat) { summaryParts.append("workspace=\(workspaceHandle)") }
         if let closed = payload["closed"] { summaryParts.append("closed=\(closed)") }
+        if let color = payload["color"] { summaryParts.append("color=\(color)") }
         if let created = formatCreatedTabHandle(payload, idFormat: idFormat) { summaryParts.append("created=\(created)") }
         appendCreatedWorkspaceSummaryParts(from: payload, idFormat: idFormat, to: &summaryParts)
         printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: summaryParts.joined(separator: " "))
@@ -8404,6 +8568,8 @@ struct CMUXCLI {
             If the app is already running, this restores the last saved session into the current app.
             If the app is not running, this launches cmux and lets startup restore reopen the saved session.
             """
+        case "profile":
+            return profileUsage()
         case "feedback":
             return """
             Usage: cmux feedback
@@ -8773,6 +8939,7 @@ struct CMUXCLI {
 
             Actions:
               rename | clear-name
+              set-color | clear-color
               close-left | close-right | close-others
               new-terminal-right | new-browser-right
               move-to-new-workspace
@@ -8786,12 +8953,15 @@ struct CMUXCLI {
               --surface <id|ref|index>     Alias for --tab (backward compatibility)
               --workspace <id|ref|index>   Workspace context (default: current/$CMUX_WORKSPACE_ID)
               --title <text>               Title for rename (or pass trailing title text)
+              --color <name|#hex>          Color for set-color (name or #RRGGBB hex)
               --url <url>                  Optional URL for new-browser-right
               --focus <true|false>         Focus the destination when supported (default: false for move-to-new-workspace)
 
             Example:
               cmux tab-action --tab tab:3 --action pin
               cmux tab-action --action close-right
+              cmux tab-action --tab tab:2 --action set-color --color blue
+              cmux tab-action --tab tab:2 clear-color
               cmux tab-action --tab tab:2 --action move-to-new-workspace
               cmux tab-action --tab tab:2 --action rename --title "build logs"
             """
@@ -20353,6 +20523,7 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
           shortcuts
           disable-browser | enable-browser | browser-status
           restore-session
+          profile save|list|load|delete
           feedback [--email <email> --body <text> [--image <path> ...]]
           feed tui|clear
           themes [list|set|clear]
@@ -20395,7 +20566,7 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
           move-surface --surface <id|ref|index> [--pane <id|ref|index>] [--workspace <id|ref|index>] [--window <id|ref|index>] [--before <id|ref|index>] [--after <id|ref|index>] [--index <n>] [--focus <true|false>]
           split-off --surface <id|ref|index> <left|right|up|down> [--workspace <id|ref|index>] [--focus <true|false>]
           reorder-surface --surface <id|ref|index> (--index <n> | --before <id|ref|index> | --after <id|ref|index>) [--focus <true|false>]
-          tab-action --action <name> [--tab <id|ref|index>] [--surface <id|ref|index>] [--workspace <id|ref|index>] [--title <text>] [--url <url>] [--focus <true|false>]
+          tab-action --action <name> [--tab <id|ref|index>] [--surface <id|ref|index>] [--workspace <id|ref|index>] [--title <text>] [--color <name|#hex>] [--url <url>] [--focus <true|false>]
           rename-tab [--workspace <id|ref>] [--tab <id|ref>] [--surface <id|ref>] <title>
           drag-surface-to-split --surface <id|ref|index> <left|right|up|down> [--workspace <id|ref|index>] [--focus <true|false>]
           refresh-surfaces
