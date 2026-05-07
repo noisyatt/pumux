@@ -2524,6 +2524,7 @@ struct ContentView: View {
         VerticalTabsSidebar(
             updateViewModel: updateViewModel,
             fileExplorerState: fileExplorerState,
+            sessionIndexStore: sessionIndexStore,
             onSendFeedback: presentFeedbackComposer,
             onToggleSidebar: { sidebarState.toggle() },
             onNewTab: {
@@ -2531,6 +2532,9 @@ struct ContentView: View {
                     tabManager: tabManager,
                     debugSource: "titlebar.hiddenNewWorkspace"
                 )
+            },
+            onResumeSession: { entry in
+                resumeSession(entry: entry)
             },
             selection: $sidebarSelectionState.selection,
             selectedTabIds: $selectedTabIds,
@@ -9731,9 +9735,11 @@ private struct SidebarTabItemPresentationSnapshot: Equatable {
 struct VerticalTabsSidebar: View {
     @ObservedObject var updateViewModel: UpdateViewModel
     @ObservedObject var fileExplorerState: FileExplorerState
+    @ObservedObject var sessionIndexStore: SessionIndexStore
     let onSendFeedback: () -> Void
     let onToggleSidebar: () -> Void
     let onNewTab: () -> Void
+    let onResumeSession: (SessionEntry) -> Void
     @EnvironmentObject var tabManager: TabManager
     @EnvironmentObject var notificationStore: TerminalNotificationStore
     @Binding var selection: SidebarSelection
@@ -9870,7 +9876,13 @@ struct VerticalTabsSidebar: View {
 
         ZStack(alignment: .bottomLeading) {
             workspaceScrollArea(renderContext: renderContext)
-            SidebarFooter(updateViewModel: updateViewModel, fileExplorerState: fileExplorerState, onSendFeedback: onSendFeedback)
+            SidebarFooter(
+                updateViewModel: updateViewModel,
+                fileExplorerState: fileExplorerState,
+                sessionIndexStore: sessionIndexStore,
+                onSendFeedback: onSendFeedback,
+                onResumeSession: onResumeSession
+            )
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityIdentifier("Sidebar")
@@ -11201,17 +11213,181 @@ final class WindowScopedShortcutHintModifierMonitor: ObservableObject {
 private struct SidebarFooter: View {
     @ObservedObject var updateViewModel: UpdateViewModel
     @ObservedObject var fileExplorerState: FileExplorerState
+    @ObservedObject var sessionIndexStore: SessionIndexStore
     let onSendFeedback: () -> Void
+    let onResumeSession: (SessionEntry) -> Void
 
     var body: some View {
 #if DEBUG
-        SidebarDevFooter(updateViewModel: updateViewModel, fileExplorerState: fileExplorerState, onSendFeedback: onSendFeedback)
+        SidebarDevFooter(
+            updateViewModel: updateViewModel,
+            fileExplorerState: fileExplorerState,
+            sessionIndexStore: sessionIndexStore,
+            onSendFeedback: onSendFeedback,
+            onResumeSession: onResumeSession
+        )
 #else
-        SidebarFooterButtons(updateViewModel: updateViewModel, fileExplorerState: fileExplorerState, onSendFeedback: onSendFeedback)
-            .padding(.leading, 6)
-            .padding(.trailing, 10)
-            .padding(.bottom, 6)
+        SidebarFooterContent(
+            updateViewModel: updateViewModel,
+            fileExplorerState: fileExplorerState,
+            sessionIndexStore: sessionIndexStore,
+            onSendFeedback: onSendFeedback,
+            onResumeSession: onResumeSession
+        )
 #endif
+    }
+}
+
+private struct SidebarFooterContent: View {
+    @ObservedObject var updateViewModel: UpdateViewModel
+    @ObservedObject var fileExplorerState: FileExplorerState
+    @ObservedObject var sessionIndexStore: SessionIndexStore
+    let onSendFeedback: () -> Void
+    let onResumeSession: (SessionEntry) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SidebarTokenManagerWidget(
+                fileExplorerState: fileExplorerState,
+                store: sessionIndexStore,
+                onResumeSession: onResumeSession
+            )
+            SidebarFooterButtons(updateViewModel: updateViewModel, fileExplorerState: fileExplorerState, onSendFeedback: onSendFeedback)
+        }
+        .padding(.leading, 6)
+        .padding(.trailing, 10)
+        .padding(.bottom, 6)
+    }
+}
+
+private struct SidebarTokenManagerWidget: View {
+    @ObservedObject var fileExplorerState: FileExplorerState
+    @ObservedObject var store: SessionIndexStore
+    let onResumeSession: (SessionEntry) -> Void
+
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
+
+    private var recentEntries: [SessionEntry] {
+        Array(store.entries.sorted { $0.modified > $1.modified }.prefix(3))
+    }
+
+    private var countLabel: String {
+        store.entries.isEmpty ? String(localized: "sidebar.tokenWidget.emptyCount", defaultValue: "empty") : "\(store.entries.count)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            header
+            if recentEntries.isEmpty {
+                emptyState
+            } else {
+                ForEach(recentEntries, id: \.id) { entry in
+                    recentEntryButton(entry)
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.045))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("SidebarTokenManagerWidget")
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "key.radiowaves.forward.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+            Text(String(localized: "sidebar.tokenWidget.title", defaultValue: "TokenManager"))
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+            Text(countLabel)
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                .monospacedDigit()
+            Spacer(minLength: 0)
+            Button {
+                openVault()
+            } label: {
+                Image(systemName: "sidebar.right")
+                    .font(.system(size: 10, weight: .medium))
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.borderless)
+            .safeHelp(String(localized: "sidebar.tokenWidget.openVault", defaultValue: "Open Vault"))
+            .accessibilityIdentifier("SidebarTokenManagerOpenButton")
+        }
+    }
+
+    private var emptyState: some View {
+        HStack(spacing: 6) {
+            if store.isLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.6)
+            }
+            Text(store.isLoading
+                 ? String(localized: "sidebar.tokenWidget.loading", defaultValue: "Loading Vault…")
+                 : String(localized: "sidebar.tokenWidget.empty", defaultValue: "Open Vault to load sessions"))
+                .font(.system(size: 10))
+                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .frame(height: 18)
+    }
+
+    private func recentEntryButton(_ entry: SessionEntry) -> some View {
+        Button {
+            onResumeSession(entry)
+        } label: {
+            HStack(spacing: 6) {
+                Image(entry.agent.assetName)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 12, height: 12)
+                    .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entry.displayTitle)
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    HStack(spacing: 4) {
+                        Text(entry.cwdBasename ?? entry.agent.displayName)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(Self.relativeFormatter.localizedString(for: entry.modified, relativeTo: Date()))
+                            .lineLimit(1)
+                    }
+                    .font(.system(size: 9))
+                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .safeHelp(entry.resumeCommandWithCwd)
+        .accessibilityIdentifier("SidebarTokenManagerRecentSession.\(entry.id)")
+    }
+
+    private func openVault() {
+        fileExplorerState.mode = .sessions
+        fileExplorerState.setVisible(true)
+        if store.entries.isEmpty && !store.isLoading {
+            store.reload()
+        }
     }
 }
 
@@ -12392,12 +12568,19 @@ private struct SidebarFooterIconButtonStyleBody: View {
 private struct SidebarDevFooter: View {
     @ObservedObject var updateViewModel: UpdateViewModel
     @ObservedObject var fileExplorerState: FileExplorerState
+    @ObservedObject var sessionIndexStore: SessionIndexStore
     let onSendFeedback: () -> Void
+    let onResumeSession: (SessionEntry) -> Void
     @AppStorage(DevBuildBannerDebugSettings.sidebarBannerVisibleKey)
     private var showSidebarDevBuildBanner = DevBuildBannerDebugSettings.defaultShowSidebarBanner
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            SidebarTokenManagerWidget(
+                fileExplorerState: fileExplorerState,
+                store: sessionIndexStore,
+                onResumeSession: onResumeSession
+            )
             SidebarFooterButtons(updateViewModel: updateViewModel, fileExplorerState: fileExplorerState, onSendFeedback: onSendFeedback)
             if showSidebarDevBuildBanner {
                 Text(DevBuildBannerDebugSettings.labelText())
