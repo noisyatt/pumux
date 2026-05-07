@@ -11241,8 +11241,13 @@ private struct SidebarTokenManagerUsageWidget: View {
             if visibleSnapshots.isEmpty {
                 emptyState
             } else {
-                ForEach(visibleSnapshots.prefix(4)) { snapshot in
-                    SidebarTokenManagerAccountRow(snapshot: snapshot)
+                ForEach(visibleSnapshots.indices, id: \.self) { index in
+                    if index > visibleSnapshots.startIndex {
+                        Divider()
+                            .overlay(Color.primary.opacity(0.08))
+                            .padding(.vertical, 1)
+                    }
+                    SidebarTokenManagerAccountRow(snapshot: visibleSnapshots[index])
                 }
             }
         }
