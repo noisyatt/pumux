@@ -11228,6 +11228,21 @@ private struct SidebarFooterContent: View {
     }
 }
 
+private enum SidebarTokenManagerPalette {
+    static let root = Color(red: 22 / 255, green: 24 / 255, blue: 30 / 255)
+    static let card = Color(red: 38 / 255, green: 42 / 255, blue: 52 / 255)
+    static let foreground = Color(red: 230 / 255, green: 233 / 255, blue: 239 / 255)
+    static let muted = Color(red: 139 / 255, green: 148 / 255, blue: 163 / 255)
+    static let dim = Color(red: 91 / 255, green: 99 / 255, blue: 113 / 255)
+    static let stroke = Color.white.opacity(0.12)
+    static let divider = Color.white.opacity(0.10)
+    static let barBackground = Color.white.opacity(0.09)
+    static let dimmedOverlay = Color.white.opacity(0.24)
+    static let green = Color(red: 74 / 255, green: 222 / 255, blue: 128 / 255)
+    static let yellow = Color(red: 250 / 255, green: 204 / 255, blue: 21 / 255)
+    static let red = Color(red: 248 / 255, green: 113 / 255, blue: 113 / 255)
+}
+
 private struct SidebarTokenManagerUsageWidget: View {
     @StateObject private var store = SidebarTokenManagerUsageStore()
 
@@ -11244,7 +11259,7 @@ private struct SidebarTokenManagerUsageWidget: View {
                 ForEach(visibleSnapshots.indices, id: \.self) { index in
                     if index > visibleSnapshots.startIndex {
                         Divider()
-                            .overlay(Color.primary.opacity(0.08))
+                            .overlay(SidebarTokenManagerPalette.divider)
                             .padding(.vertical, 1)
                     }
                     SidebarTokenManagerAccountRow(snapshot: visibleSnapshots[index])
@@ -11255,11 +11270,11 @@ private struct SidebarTokenManagerUsageWidget: View {
         .padding(.vertical, 7)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.primary.opacity(0.045))
+                .fill(SidebarTokenManagerPalette.root)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                .stroke(SidebarTokenManagerPalette.stroke, lineWidth: 1)
         )
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("SidebarTokenManagerUsageWidget")
@@ -11271,13 +11286,14 @@ private struct SidebarTokenManagerUsageWidget: View {
         HStack(spacing: 6) {
             Image(systemName: "gauge.with.dots.needle.bottom.50percent")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                .foregroundStyle(SidebarTokenManagerPalette.muted)
             Text("TokenManager")
                 .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(SidebarTokenManagerPalette.foreground)
                 .lineLimit(1)
             Text(store.statusLabel)
                 .font(.system(size: 10, weight: .medium, design: .rounded))
-                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                .foregroundStyle(SidebarTokenManagerPalette.dim)
                 .lineLimit(1)
             Spacer(minLength: 0)
             Button {
@@ -11287,6 +11303,7 @@ private struct SidebarTokenManagerUsageWidget: View {
                     .font(.system(size: 10, weight: .medium))
                     .frame(width: 18, height: 18)
             }
+            .foregroundStyle(SidebarTokenManagerPalette.muted)
             .buttonStyle(.borderless)
             .disabled(store.isLoading)
             .safeHelp("Refresh TokenManager usage")
@@ -11303,7 +11320,7 @@ private struct SidebarTokenManagerUsageWidget: View {
             }
             Text(store.errorMessage ?? "No usage snapshots")
                 .font(.system(size: 10))
-                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                .foregroundStyle(SidebarTokenManagerPalette.dim)
                 .lineLimit(1)
             Spacer(minLength: 0)
         }
@@ -11318,22 +11335,29 @@ private struct SidebarTokenManagerAccountRow: View {
         snapshot.rateLimit ?? SidebarTokenManagerRateLimit()
     }
 
+    private var isDimmed: Bool {
+        rateLimit.fiveHourUtilization >= 1 ||
+            rateLimit.sevenDayUtilization >= 1 ||
+            rateLimit.status == "rejected"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
                 Text(snapshot.label)
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(SidebarTokenManagerPalette.foreground)
                     .lineLimit(1)
                 if let plan = snapshot.subscriptionType, !plan.isEmpty {
                     Text(plan)
                         .font(.system(size: 9))
-                        .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                        .foregroundStyle(SidebarTokenManagerPalette.muted)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
                 Text(snapshot.identityLabel)
                     .font(.system(size: 9))
-                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                    .foregroundStyle(SidebarTokenManagerPalette.muted)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -11348,40 +11372,55 @@ private struct SidebarTokenManagerAccountRow: View {
                 resetEpoch: rateLimit.sevenDayReset
             )
         }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(SidebarTokenManagerPalette.card)
+        )
+        .overlay {
+            if isDimmed {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(SidebarTokenManagerPalette.dimmedOverlay)
+            }
+        }
         .accessibilityIdentifier("SidebarTokenManagerAccount.\(snapshot.label)")
     }
 
     private func usageRow(label: String, utilization: Double, resetEpoch: Int64?) -> some View {
-        HStack(spacing: 5) {
+        let clampedUtilization = max(0, min(1, utilization))
+        let isFull = clampedUtilization >= 1
+        return HStack(spacing: 5) {
             Text(label)
                 .font(.system(size: 9, weight: .semibold, design: .rounded))
-                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                .foregroundStyle(SidebarTokenManagerPalette.muted)
                 .frame(width: 16, alignment: .leading)
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.10))
+                    Capsule().fill(SidebarTokenManagerPalette.barBackground)
                     Capsule()
-                        .fill(barColor(for: utilization))
-                        .frame(width: max(0, min(proxy.size.width, proxy.size.width * utilization)))
+                        .fill(barColor(for: clampedUtilization))
+                        .frame(width: proxy.size.width * clampedUtilization)
                 }
             }
             .frame(height: 6)
-            Text("\(Int((utilization * 100).rounded()))%")
+            Text("\(Int((clampedUtilization * 100).rounded()))%")
                 .font(.system(size: 9, weight: .medium, design: .rounded))
+                .foregroundStyle(isFull ? SidebarTokenManagerPalette.foreground : SidebarTokenManagerPalette.muted)
                 .monospacedDigit()
                 .frame(width: 28, alignment: .trailing)
             Text(Self.formatReset(resetEpoch))
-                .font(.system(size: 9, weight: utilization >= 1 ? .bold : .regular, design: .rounded))
-                .foregroundStyle(utilization >= 1 ? Color.primary : Color(nsColor: .secondaryLabelColor))
+                .font(.system(size: 9, weight: isFull ? .bold : .regular, design: .rounded))
+                .foregroundStyle(isFull ? SidebarTokenManagerPalette.foreground : SidebarTokenManagerPalette.muted)
                 .lineLimit(1)
                 .frame(width: 42, alignment: .trailing)
         }
     }
 
     private func barColor(for utilization: Double) -> Color {
-        if utilization >= 1 { return .red.opacity(0.82) }
-        if utilization >= 0.8 { return .orange.opacity(0.85) }
-        return .green.opacity(0.75)
+        if utilization >= 0.9 { return SidebarTokenManagerPalette.red }
+        if utilization >= 0.7 { return SidebarTokenManagerPalette.yellow }
+        return SidebarTokenManagerPalette.green
     }
 
     private static func formatReset(_ epoch: Int64?) -> String {
