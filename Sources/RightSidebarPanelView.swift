@@ -31,7 +31,7 @@ enum RightSidebarMode: String, CaseIterable {
         switch self {
         case .files: return "folder"
         case .find: return "magnifyingglass"
-        case .sessions: return "books.vertical"
+        case .sessions: return "key.radiowaves.forward.fill"
         case .feed: return "dot.radiowaves.left.and.right"
         case .dock: return "dock.rectangle"
         }
