@@ -238,6 +238,9 @@ struct RightSidebarPanelView: View {
                 }
             }
             Spacer(minLength: 0)
+            RightSidebarCloseButton {
+                closeRightSidebar()
+            }
         }
         .rightSidebarChromeBar(leadingPadding: 4, trailingPadding: 6, height: titlebarHeight)
         .background(MinimalModeTitlebarControlHitRegionView())
@@ -326,6 +329,39 @@ struct RightSidebarPanelView: View {
             focusFirstItem: false,
             preferredWindow: window
         )
+    }
+
+    private func closeRightSidebar() {
+        let window = NSApp.keyWindow ?? NSApp.mainWindow
+        fileExplorerState.setVisible(false)
+        _ = AppDelegate.shared?.restoreTerminalFocusAfterRightSidebarHidden(in: window)
+    }
+}
+
+private struct RightSidebarCloseButton: View {
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: RightSidebarChromeMetrics.controlHeight, height: RightSidebarChromeMetrics.controlHeight)
+                .foregroundStyle(isHovered ? Color.primary : Color.secondary)
+                .background(
+                    RoundedRectangle(cornerRadius: RightSidebarChromeMetrics.controlCornerRadius, style: .continuous)
+                        .fill(isHovered ? Color.primary.opacity(0.08) : Color.clear)
+                )
+                .contentShape(
+                    RoundedRectangle(cornerRadius: RightSidebarChromeMetrics.controlCornerRadius, style: .continuous)
+                )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .safeHelp(String(localized: "common.close", defaultValue: "Close"))
+        .accessibilityLabel(Text(String(localized: "common.close", defaultValue: "Close")))
+        .accessibilityIdentifier("RightSidebarCloseButton")
     }
 }
 
