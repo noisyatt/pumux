@@ -982,6 +982,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let env = ProcessInfo.processInfo.environment
+#if DEBUG
+        CmuxLifecycleExitTracker.install(environment: env)
+#endif
         let isRunningUnderXCTest = isRunningUnderXCTest(env)
         let telemetryEnabled = TelemetrySettings.enabledForCurrentLaunch
         AppIconLaunchState.markDidFinishLaunching()
@@ -1478,6 +1481,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         isTerminatingApp = true
+#if DEBUG
+        CmuxLifecycleExitTracker.recordTerminationIntent(reason: "applicationShouldTerminate")
+#endif
         _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
 
         // Tagged DEV builds are ephemeral, skip quit confirmation entirely.
@@ -1520,6 +1526,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             } else {
                 // Reset so that the next quit attempt can show the dialog again.
                 self.isTerminatingApp = false
+#if DEBUG
+                CmuxLifecycleExitTracker.recordTerminationCancelled(reason: "quitWarningCancelled")
+#endif
             }
             NSApp.reply(toApplicationShouldTerminate: shouldQuit)
         }
@@ -1539,6 +1548,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         notificationStore?.clearAll()
         enableSuddenTerminationIfNeeded()
+#if DEBUG
+        CmuxLifecycleExitTracker.markCleanExit(reason: "applicationWillTerminate")
+#endif
     }
 
     func applicationWillResignActive(_ notification: Notification) {
