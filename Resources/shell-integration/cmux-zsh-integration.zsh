@@ -1090,6 +1090,109 @@ _cmux_command_starts_nested_shell() {
     return 1
 }
 
+_cmux_infer_token_account_label_from_command() {
+    emulate -L zsh
+    local cmd="${1:-}"
+    [[ -n "$cmd" ]] || return 1
+
+    local -a words
+    words=(${(z)cmd})
+    local word
+    for word in "${words[@]}"; do
+        case "$word" in
+            *=*) continue ;;
+        esac
+        case "$word" in
+            command|builtin|env|noglob|nocorrect|time|exec|sudo|doas|nohup)
+                continue ;;
+        esac
+        case "$word" in
+            codex|codexx)
+                print -r -- C1
+                return 0 ;;
+            claude|claudex)
+                print -r -- A1
+                return 0 ;;
+            codex[2-9]|codexx[2-9])
+                print -r -- "C${word[-1]}"
+                return 0 ;;
+            claude[2-9]|claudex[2-9])
+                print -r -- "A${word[-1]}"
+                return 0 ;;
+        esac
+        return 1
+    done
+
+    return 1
+}
+
+_cmux_report_token_account_for_command() {
+    [[ -n "$CMUX_TAB_ID" ]] || return 0
+    local label
+    label="$(_cmux_infer_token_account_label_from_command "$1" 2>/dev/null)" || return 0
+    [[ -n "$label" ]] || return 0
+    local payload="report_token_account $label --tab=$CMUX_TAB_ID"
+    if [[ -n "$CMUX_PANEL_ID" ]]; then
+        payload+=" --panel=$CMUX_PANEL_ID"
+    fi
+    _cmux_send_bg "$payload"
+}
+
+_cmux_report_remote_tmux_for_command() {
+    emulate -L zsh
+    [[ -n "$CMUX_TAB_ID" ]] || return 0
+    local cmd="${1:-}"
+    [[ -n "$cmd" ]] || return 0
+
+    local -a words
+    words=(${(z)cmd})
+    local host="" session="" transport="mosh"
+    if [[ "${words[1]:-}" == "mt" && -n "${words[2]:-}" ]]; then
+        host="mac"
+        session="${words[2]}"
+    elif [[ "${words[1]:-}" == "mosh" && -n "${words[2]:-}" ]]; then
+        local i
+        for (( i = 3; i <= ${#words}; i++ )); do
+            if [[ "${words[i]}" == "--" && "${words[i+1]:-}" == "tmux" ]]; then
+                host="${words[2]}"
+                local j
+                for (( j = i + 2; j <= ${#words}; j++ )); do
+                    if [[ "${words[j]}" == "-s" && -n "${words[j+1]:-}" ]]; then
+                        session="${words[j+1]}"
+                        break
+                    fi
+                done
+                break
+            fi
+        done
+    fi
+
+    [[ -n "$host" && -n "$session" ]] || return 0
+    local payload="report_remote_tmux $host $session --transport=$transport --tab=$CMUX_TAB_ID"
+    if [[ -n "$CMUX_PANEL_ID" ]]; then
+        payload+=" --panel=$CMUX_PANEL_ID"
+    fi
+    _cmux_send_bg "$payload"
+}
+
+_cmux_clear_token_account_label() {
+    [[ -n "$CMUX_TAB_ID" ]] || return 0
+    local payload="report_token_account clear --tab=$CMUX_TAB_ID"
+    if [[ -n "$CMUX_PANEL_ID" ]]; then
+        payload+=" --panel=$CMUX_PANEL_ID"
+    fi
+    _cmux_send_bg "$payload"
+}
+
+_cmux_clear_remote_tmux_context() {
+    [[ -n "$CMUX_TAB_ID" ]] || return 0
+    local payload="report_remote_tmux clear --tab=$CMUX_TAB_ID"
+    if [[ -n "$CMUX_PANEL_ID" ]]; then
+        payload+=" --panel=$CMUX_PANEL_ID"
+    fi
+    _cmux_send_bg "$payload"
+}
+
 _cmux_preexec() {
     _cmux_normalize_claude_config_dir
     if (( ! _CMUX_DELAY_TERM_RESTORE_UNTIL_FIRST_PROMPT )); then
@@ -1107,6 +1210,8 @@ _cmux_preexec() {
 
     _CMUX_CMD_START="$(_cmux_now)"
     _cmux_report_shell_activity_state running
+    _cmux_report_token_account_for_command "$cmd"
+    _cmux_report_remote_tmux_for_command "$cmd"
     _cmux_record_pr_command_hint "$cmd"
 
     # Heuristic: commands that may change git branch/dirty state without changing $PWD.
@@ -1143,6 +1248,8 @@ _cmux_precmd() {
     if [[ -n "$CMUX_PANEL_ID" ]]; then
         _cmux_report_shell_activity_state prompt
     fi
+    _cmux_clear_token_account_label
+    _cmux_clear_remote_tmux_context
 
     # Handle cases where Ghostty integration initializes after this file.
     (( _CMUX_GHOSTTY_SEMANTIC_PATCHED )) || _cmux_patch_ghostty_semantic_redraw

@@ -2143,6 +2143,12 @@ class TerminalController {
         case "report_shell_state":
             return reportShellState(args)
 
+        case "report_token_account":
+            return reportTokenAccount(args)
+
+        case "report_remote_tmux":
+            return reportRemoteTmux(args)
+
         case "report_pr_action":
             return reportPullRequestAction(args)
 
@@ -12809,6 +12815,8 @@ class TerminalController {
           report_tty <tty_name> [--tab=X] [--panel=Y] - Register TTY for batched port scanning
           ports_kick [--tab=X] [--panel=Y] [--reason=command|refresh] - Request batched port scan for panel
           report_shell_state <prompt|running> [--tab=X] [--panel=Y] - Report whether the shell is idle at a prompt or running a command
+          report_token_account <label|clear> [--tab=X] [--panel=Y] - Report inferred token account label for a terminal
+          report_remote_tmux <host> <session>|clear [--transport=mosh|ssh] [--tab=X] [--panel=Y] - Track remote tmux account state
           report_pr_action <merge|close|reopen|create|checkout|ready|edit|view> [--target=X] [--tab=X] [--panel=Y] - Hint that a PR-affecting command completed in the panel
           report_pwd <path> [--tab=X] [--panel=Y] - Report current working directory
           clear_ports [--tab=X] [--panel=Y] - Clear listening ports
@@ -16825,6 +16833,188 @@ class TerminalController {
             }
 
             tabManager.updateSurfaceShellActivity(tabId: tab.id, surfaceId: surfaceId, state: state)
+        }
+        return result
+    }
+
+    private func reportTokenAccount(_ args: String) -> String {
+        let parsed = parseOptions(args)
+        guard let rawLabel = parsed.positional.first else {
+            return "ERROR: Missing label — usage: report_token_account <label|clear> [--tab=X] [--panel=Y]"
+        }
+        let trimmedLabel = rawLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = trimmedLabel.caseInsensitiveCompare("clear") == .orderedSame ? nil : trimmedLabel
+
+        if let scope = Self.explicitSocketScope(options: parsed.options) {
+            TerminalMutationBus.shared.enqueueMainActorMutation {
+                guard let tabManager = AppDelegate.shared?.tabManagerFor(tabId: scope.workspaceId) else { return }
+                tabManager.updateSurfaceTokenAccountLabel(
+                    tabId: scope.workspaceId,
+                    surfaceId: scope.panelId,
+                    label: label
+                )
+            }
+            return "OK"
+        }
+
+        if let tabRaw = parsed.options["tab"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !tabRaw.isEmpty,
+           parsed.options["panel"] == nil,
+           parsed.options["surface"] == nil,
+           let workspaceId = UUID(uuidString: tabRaw) {
+            TerminalMutationBus.shared.enqueueMainActorMutation {
+                guard let tabManager = AppDelegate.shared?.tabManagerFor(tabId: workspaceId),
+                      let tab = tabManager.tabs.first(where: { $0.id == workspaceId }),
+                      let surfaceId = tab.focusedPanelId else {
+                    return
+                }
+                tabManager.updateSurfaceTokenAccountLabel(tabId: workspaceId, surfaceId: surfaceId, label: label)
+            }
+            return "OK"
+        }
+
+        guard let tabManager else { return "ERROR: TabManager not available" }
+
+        var result = "OK"
+        v2MainSync {
+            guard let tab = resolveTabForReport(args) else {
+                result = parsed.options["tab"] != nil ? "ERROR: Tab not found" : "ERROR: No tab selected"
+                return
+            }
+
+            let panelArg = parsed.options["panel"] ?? parsed.options["surface"]
+            let surfaceId: UUID
+            if let panelArg {
+                if panelArg.isEmpty {
+                    result = "ERROR: Missing panel id — usage: report_token_account <label|clear> [--tab=X] [--panel=Y]"
+                    return
+                }
+                guard let parsedId = UUID(uuidString: panelArg) else {
+                    result = "ERROR: Invalid panel id '\(panelArg)'"
+                    return
+                }
+                surfaceId = parsedId
+            } else {
+                guard let focused = tab.focusedPanelId else {
+                    result = "ERROR: Missing panel id (no focused surface)"
+                    return
+                }
+                surfaceId = focused
+            }
+
+            guard tab.panels[surfaceId] != nil else {
+                result = "ERROR: Panel not found '\(surfaceId.uuidString)'"
+                return
+            }
+
+            tabManager.updateSurfaceTokenAccountLabel(tabId: tab.id, surfaceId: surfaceId, label: label)
+        }
+        return result
+    }
+
+    private func reportRemoteTmux(_ args: String) -> String {
+        let parsed = parseOptions(args)
+        let first = parsed.positional.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let clearing = first.caseInsensitiveCompare("clear") == .orderedSame
+        let host: String?
+        let sessionName: String?
+        let transport: String?
+
+        if clearing {
+            host = nil
+            sessionName = nil
+            transport = nil
+        } else {
+            let rawHost = parsed.options["host"] ?? parsed.positional.first
+            let rawSession = parsed.options["session"] ?? parsed.positional.dropFirst().first
+            guard let rawHost,
+                  let rawSession,
+                  !rawHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !rawSession.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return "ERROR: Missing host/session — usage: report_remote_tmux <host> <session> [--transport=mosh] [--tab=X] [--panel=Y]"
+            }
+            host = rawHost
+            sessionName = rawSession
+            transport = parsed.options["transport"] ?? "mosh"
+        }
+
+        if let scope = Self.explicitSocketScope(options: parsed.options) {
+            TerminalMutationBus.shared.enqueueMainActorMutation {
+                guard let tabManager = AppDelegate.shared?.tabManagerFor(tabId: scope.workspaceId) else { return }
+                tabManager.updateSurfaceRemoteTmuxContext(
+                    tabId: scope.workspaceId,
+                    surfaceId: scope.panelId,
+                    host: host,
+                    sessionName: sessionName,
+                    transport: transport
+                )
+            }
+            return "OK"
+        }
+
+        if let tabRaw = parsed.options["tab"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !tabRaw.isEmpty,
+           parsed.options["panel"] == nil,
+           parsed.options["surface"] == nil,
+           let workspaceId = UUID(uuidString: tabRaw) {
+            TerminalMutationBus.shared.enqueueMainActorMutation {
+                guard let tabManager = AppDelegate.shared?.tabManagerFor(tabId: workspaceId),
+                      let tab = tabManager.tabs.first(where: { $0.id == workspaceId }),
+                      let surfaceId = tab.focusedPanelId else {
+                    return
+                }
+                tabManager.updateSurfaceRemoteTmuxContext(
+                    tabId: workspaceId,
+                    surfaceId: surfaceId,
+                    host: host,
+                    sessionName: sessionName,
+                    transport: transport
+                )
+            }
+            return "OK"
+        }
+
+        guard let tabManager else { return "ERROR: TabManager not available" }
+
+        var result = "OK"
+        v2MainSync {
+            guard let tab = resolveTabForReport(args) else {
+                result = parsed.options["tab"] != nil ? "ERROR: Tab not found" : "ERROR: No tab selected"
+                return
+            }
+
+            let panelArg = parsed.options["panel"] ?? parsed.options["surface"]
+            let surfaceId: UUID
+            if let panelArg {
+                if panelArg.isEmpty {
+                    result = "ERROR: Missing panel id — usage: report_remote_tmux <host> <session> [--transport=mosh] [--tab=X] [--panel=Y]"
+                    return
+                }
+                guard let parsedId = UUID(uuidString: panelArg) else {
+                    result = "ERROR: Invalid panel id '\(panelArg)'"
+                    return
+                }
+                surfaceId = parsedId
+            } else {
+                guard let focused = tab.focusedPanelId else {
+                    result = "ERROR: Missing panel id (no focused surface)"
+                    return
+                }
+                surfaceId = focused
+            }
+
+            guard tab.panels[surfaceId] != nil else {
+                result = "ERROR: Panel not found '\(surfaceId.uuidString)'"
+                return
+            }
+
+            tabManager.updateSurfaceRemoteTmuxContext(
+                tabId: tab.id,
+                surfaceId: surfaceId,
+                host: host,
+                sessionName: sessionName,
+                transport: transport
+            )
         }
         return result
     }

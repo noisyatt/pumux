@@ -4002,6 +4002,27 @@ class TabManager: ObservableObject {
         }
     }
 
+    func updateSurfaceTokenAccountLabel(tabId: UUID, surfaceId: UUID, label: String?) {
+        guard let tab = tabs.first(where: { $0.id == tabId }) else { return }
+        tab.updatePanelTokenAccountLabel(panelId: surfaceId, label: label)
+    }
+
+    func updateSurfaceRemoteTmuxContext(
+        tabId: UUID,
+        surfaceId: UUID,
+        host: String?,
+        sessionName: String?,
+        transport: String?
+    ) {
+        guard let tab = tabs.first(where: { $0.id == tabId }) else { return }
+        tab.updatePanelRemoteTmuxContext(
+            panelId: surfaceId,
+            host: host,
+            sessionName: sessionName,
+            transport: transport
+        )
+    }
+
     func handleWorkspacePullRequestCommandHint(
         tabId: UUID,
         surfaceId: UUID,

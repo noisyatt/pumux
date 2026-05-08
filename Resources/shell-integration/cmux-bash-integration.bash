@@ -934,6 +934,8 @@ _cmux_preexec_command() {
     fi
 
     _cmux_report_shell_activity_state running
+    _cmux_report_token_account_for_command "$cmd"
+    _cmux_report_remote_tmux_for_command "$cmd"
     _cmux_report_tty_once
     _cmux_ports_kick command
     _cmux_halt_pr_poll_loop
@@ -944,6 +946,107 @@ _cmux_preexec_command() {
 
 _cmux_bash_preexec_hook() {
     _cmux_preexec_command "$@"
+}
+
+_cmux_infer_token_account_label_from_command() {
+    local cmd="${1:-}"
+    [[ -n "$cmd" ]] || return 1
+
+    local -a words
+    read -r -a words <<< "$cmd"
+    local word
+    for word in "${words[@]}"; do
+        case "$word" in
+            *=*) continue ;;
+        esac
+        case "$word" in
+            command|builtin|env|noglob|nocorrect|time|exec|sudo|doas|nohup)
+                continue ;;
+        esac
+        case "$word" in
+            codex|codexx)
+                printf '%s\n' C1
+                return 0 ;;
+            claude|claudex)
+                printf '%s\n' A1
+                return 0 ;;
+            codex[2-9]|codexx[2-9])
+                printf 'C%s\n' "${word: -1}"
+                return 0 ;;
+            claude[2-9]|claudex[2-9])
+                printf 'A%s\n' "${word: -1}"
+                return 0 ;;
+        esac
+        return 1
+    done
+
+    return 1
+}
+
+_cmux_report_token_account_for_command() {
+    [[ -n "$CMUX_TAB_ID" ]] || return 0
+    local label
+    label="$(_cmux_infer_token_account_label_from_command "$1" 2>/dev/null)" || return 0
+    [[ -n "$label" ]] || return 0
+    local payload="report_token_account $label --tab=$CMUX_TAB_ID"
+    if [[ -n "$CMUX_PANEL_ID" ]]; then
+        payload+=" --panel=$CMUX_PANEL_ID"
+    fi
+    _cmux_send "$payload"
+}
+
+_cmux_report_remote_tmux_for_command() {
+    [[ -n "$CMUX_TAB_ID" ]] || return 0
+    local cmd="${1:-}"
+    [[ -n "$cmd" ]] || return 0
+
+    local -a words
+    read -r -a words <<< "$cmd"
+    local host="" session="" transport="mosh"
+    if [[ "${words[0]:-}" == "mt" && -n "${words[1]:-}" ]]; then
+        host="mac"
+        session="${words[1]}"
+    elif [[ "${words[0]:-}" == "mosh" && -n "${words[1]:-}" ]]; then
+        local i
+        for (( i = 2; i < ${#words[@]}; i++ )); do
+            if [[ "${words[$i]}" == "--" && "${words[$((i + 1))]:-}" == "tmux" ]]; then
+                host="${words[1]}"
+                local j
+                for (( j = i + 2; j < ${#words[@]}; j++ )); do
+                    if [[ "${words[$j]}" == "-s" && -n "${words[$((j + 1))]:-}" ]]; then
+                        session="${words[$((j + 1))]}"
+                        break
+                    fi
+                done
+                break
+            fi
+        done
+    fi
+
+    [[ -n "$host" && -n "$session" ]] || return 0
+    local payload="report_remote_tmux $host $session --transport=$transport --tab=$CMUX_TAB_ID"
+    if [[ -n "$CMUX_PANEL_ID" ]]; then
+        payload+=" --panel=$CMUX_PANEL_ID"
+    fi
+    _cmux_send "$payload"
+}
+
+_cmux_clear_token_account_label() {
+    [[ -n "$CMUX_TAB_ID" ]] || return 0
+    local payload="report_token_account clear --tab=$CMUX_TAB_ID"
+    if [[ -n "$CMUX_PANEL_ID" ]]; then
+        payload+=" --panel=$CMUX_PANEL_ID"
+    fi
+    _cmux_send "$payload"
+}
+
+_cmux_clear_remote_tmux_context() {
+    [[ -n "$CMUX_TAB_ID" ]] || return 0
+    local payload="report_remote_tmux clear --tab=$CMUX_TAB_ID"
+    if [[ -n "$CMUX_PANEL_ID" ]]; then
+        payload+=" --panel=$CMUX_PANEL_ID"
+    fi
+    _cmux_send "$payload"
 }
 
 _cmux_prompt_command() {
@@ -965,6 +1068,8 @@ _cmux_prompt_command() {
     if [[ -n "$CMUX_PANEL_ID" ]]; then
         _cmux_report_shell_activity_state prompt
     fi
+    _cmux_clear_token_account_label
+    _cmux_clear_remote_tmux_context
     _cmux_report_tty_once
 
     local now

@@ -7233,6 +7233,12 @@ struct ClosedBrowserPanelRestoreSnapshot {
     let fallbackAnchorPaneId: UUID?
 }
 
+struct RemoteTmuxContext: Equatable {
+    let host: String
+    let sessionName: String
+    let transport: String
+}
+
 /// Workspace represents a sidebar tab.
 /// Each workspace contains one BonsplitController that manages split panes and nested surfaces.
 @MainActor
@@ -7367,6 +7373,9 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var remoteLastHeartbeatAt: Date?
     @Published var listeningPorts: [Int] = []
     @Published private(set) var activeRemoteTerminalSessionCount: Int = 0
+    @Published var panelTokenAccountLabels: [UUID: String] = [:]
+    @Published var panelRemoteTmuxContexts: [UUID: RemoteTmuxContext] = [:]
+    private var tmuxTokenAccountScanWorkItems: [UUID: DispatchWorkItem] = [:]
     var surfaceTTYNames: [UUID: String] = [:]
     private var remoteSessionController: WorkspaceRemoteSessionController?
     private var pendingRemoteForegroundAuthToken: String?
@@ -8342,12 +8351,126 @@ final class Workspace: Identifiable, ObservableObject {
 
     private func resolvedPanelTitle(panelId: UUID, fallback: String) -> String {
         let trimmedFallback = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fallbackTitle = trimmedFallback.isEmpty ? "Tab" : trimmedFallback
-        if let custom = panelCustomTitles[panelId]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !custom.isEmpty {
-            return custom
+        let rawTitle: String = {
+            if let custom = panelCustomTitles[panelId]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !custom.isEmpty {
+                return custom
+            }
+            return trimmedFallback.isEmpty ? "Tab" : trimmedFallback
+        }()
+
+        let showsTmuxBadge: Bool
+        let managedTmuxSessionName: String?
+        let remoteTmuxContext = panelRemoteTmuxContexts[panelId]
+            ?? Self.remoteTmuxContext(fromDisplayedCommandTitle: rawTitle)
+        if let remoteTmuxContext, panelRemoteTmuxContexts[panelId] == nil {
+            panelRemoteTmuxContexts[panelId] = remoteTmuxContext
         }
-        return fallbackTitle
+        let titleWithoutTmuxPrefix: String
+        if let remoteTmuxContext {
+            showsTmuxBadge = true
+            managedTmuxSessionName = remoteTmuxContext.sessionName
+            titleWithoutTmuxPrefix = Self.titleWithoutLeadingStatusPrefixes(
+                Self.titleRemovingTmuxPrefix(rawTitle)
+            )
+        } else if let terminalPanel = panels[panelId] as? TerminalPanel,
+           let sessionName = Self.managedTmuxSessionName(from: terminalPanel.tmuxStartCommand) {
+            showsTmuxBadge = true
+            managedTmuxSessionName = sessionName
+            titleWithoutTmuxPrefix = Self.titleRemovingTmuxPrefix(rawTitle)
+        } else if Self.titleHasTmuxPrefix(rawTitle) {
+            showsTmuxBadge = true
+            managedTmuxSessionName = Self.titleRemovingTmuxPrefix(rawTitle)
+            titleWithoutTmuxPrefix = Self.titleRemovingTmuxPrefix(rawTitle)
+        } else {
+            showsTmuxBadge = false
+            managedTmuxSessionName = nil
+            titleWithoutTmuxPrefix = rawTitle
+        }
+
+        if let remoteTmuxContext, showsTmuxBadge {
+            scheduleTmuxTokenAccountScan(
+                panelId: panelId,
+                sessionName: remoteTmuxContext.sessionName,
+                remoteContext: remoteTmuxContext
+            )
+        } else if let managedTmuxSessionName, showsTmuxBadge {
+            scheduleTmuxTokenAccountScan(panelId: panelId, sessionName: managedTmuxSessionName)
+        }
+
+        var parts: [String] = []
+        if let account = panelTokenAccountLabels[panelId]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !account.isEmpty {
+            parts.append(account.uppercased())
+        }
+        if showsTmuxBadge {
+            parts.append("TMUX")
+        }
+        let displayTitle = titleWithoutTmuxPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        parts.append(displayTitle.isEmpty ? "Tab" : displayTitle)
+        return parts.joined(separator: " - ")
+    }
+
+    private static func titleHasTmuxPrefix(_ title: String) -> Bool {
+        title.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .hasPrefix("tmux:")
+    }
+
+    private static func titleRemovingTmuxPrefix(_ title: String) -> String {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("tmux:") else { return trimmed }
+        return String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func remoteTmuxContext(fromDisplayedCommandTitle title: String) -> RemoteTmuxContext? {
+        let trimmed = titleWithoutLeadingStatusPrefixes(title)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let match = trimmed.range(
+            of: #"^mt\s+([^\s]+)"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) {
+            let matched = String(trimmed[match])
+            let parts = matched.split(whereSeparator: { $0.isWhitespace })
+            if parts.count >= 2 {
+                return RemoteTmuxContext(host: "mac", sessionName: String(parts[1]), transport: "mosh")
+            }
+        }
+
+        guard let match = trimmed.range(
+            of: #"^mosh\s+([^\s]+)\s+--\s+tmux\b.*\s-s\s+([^\s]+)"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) else {
+            return nil
+        }
+        let matched = String(trimmed[match])
+        let parts = matched.split(whereSeparator: { $0.isWhitespace })
+        guard parts.count >= 2, let sessionFlagIndex = parts.lastIndex(of: "-s"),
+              parts.index(after: sessionFlagIndex) < parts.endIndex else {
+            return nil
+        }
+        return RemoteTmuxContext(
+            host: String(parts[1]),
+            sessionName: String(parts[parts.index(after: sessionFlagIndex)]),
+            transport: "mosh"
+        )
+    }
+
+    private static func titleWithoutLeadingStatusPrefixes(_ title: String) -> String {
+        var parts = title
+            .components(separatedBy: " - ")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        while let first = parts.first?.uppercased() {
+            if first == "TMUX" || first == "MOSH" || first == "SSH"
+                || first.range(of: #"^[AC][1-9]$"#, options: .regularExpression) != nil {
+                parts.removeFirst()
+                continue
+            }
+            break
+        }
+        let stripped = parts.joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
+        return stripped.isEmpty ? title.trimmingCharacters(in: .whitespacesAndNewlines) : stripped
     }
 
     private func syncPinnedStateForTab(_ tabId: TabID, panelId: UUID) {
@@ -8487,6 +8610,221 @@ final class Workspace: Identifiable, ObservableObject {
             tabId,
             customColorHex: .some(normalized)
         )
+    }
+
+    func updatePanelTokenAccountLabel(panelId: UUID, label: String?) {
+        guard let panel = panels[panelId] else { return }
+        let normalized = Self.normalizedTokenAccountLabel(label)
+        guard panelTokenAccountLabels[panelId] != normalized else { return }
+
+        if let normalized {
+            panelTokenAccountLabels[panelId] = normalized
+        } else {
+            panelTokenAccountLabels.removeValue(forKey: panelId)
+        }
+
+        guard let tabId = surfaceIdFromPanelId(panelId) else { return }
+        let baseTitle = panelTitles[panelId] ?? panel.displayTitle
+        bonsplitController.updateTab(
+            tabId,
+            title: resolvedPanelTitle(panelId: panelId, fallback: baseTitle),
+            hasCustomTitle: panelCustomTitles[panelId] != nil
+        )
+    }
+
+    func updatePanelRemoteTmuxContext(panelId: UUID, host: String?, sessionName: String?, transport: String?) {
+        guard let panel = panels[panelId] else { return }
+        let normalizedHost = host?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalizedSession = sessionName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalizedTransport = (transport?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "mosh").lowercased()
+        let nextContext: RemoteTmuxContext?
+        if !normalizedHost.isEmpty, !normalizedSession.isEmpty {
+            nextContext = RemoteTmuxContext(
+                host: normalizedHost,
+                sessionName: normalizedSession,
+                transport: normalizedTransport.isEmpty ? "mosh" : normalizedTransport
+            )
+        } else {
+            nextContext = nil
+        }
+
+        guard panelRemoteTmuxContexts[panelId] != nextContext else { return }
+        panelRemoteTmuxContexts[panelId] = nextContext
+        if nextContext == nil {
+            tmuxTokenAccountScanWorkItems.removeValue(forKey: panelId)?.cancel()
+            updatePanelTokenAccountLabel(panelId: panelId, label: nil)
+            return
+        }
+
+        guard let tabId = surfaceIdFromPanelId(panelId) else { return }
+        let baseTitle = panelTitles[panelId] ?? panel.displayTitle
+        bonsplitController.updateTab(
+            tabId,
+            title: resolvedPanelTitle(panelId: panelId, fallback: baseTitle),
+            hasCustomTitle: panelCustomTitles[panelId] != nil
+        )
+    }
+
+    private nonisolated static func normalizedTokenAccountLabel(_ label: String?) -> String? {
+        let trimmed = label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        let upper = trimmed.uppercased()
+        guard upper.range(of: #"^[A-Z][A-Z0-9]{0,7}$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        return upper
+    }
+
+    private func scheduleTmuxTokenAccountScan(
+        panelId: UUID,
+        sessionName: String,
+        remoteContext: RemoteTmuxContext? = nil
+    ) {
+        guard panels[panelId] is TerminalPanel else { return }
+        if tmuxTokenAccountScanWorkItems[panelId] != nil { return }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let label: String?
+            if let remoteContext {
+                label = Self.inferRemoteTmuxTokenAccountLabel(context: remoteContext)
+            } else {
+                label = Self.inferTmuxTokenAccountLabel(sessionName: sessionName)
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard self.panels[panelId] is TerminalPanel else {
+                    self.tmuxTokenAccountScanWorkItems.removeValue(forKey: panelId)
+                    return
+                }
+                if let remoteContext, self.panelRemoteTmuxContexts[panelId] != remoteContext {
+                    self.tmuxTokenAccountScanWorkItems.removeValue(forKey: panelId)
+                    return
+                }
+                self.updatePanelTokenAccountLabel(panelId: panelId, label: label)
+                self.tmuxTokenAccountScanWorkItems.removeValue(forKey: panelId)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    self?.scheduleTmuxTokenAccountScan(
+                        panelId: panelId,
+                        sessionName: sessionName,
+                        remoteContext: remoteContext
+                    )
+                }
+            }
+        }
+        tmuxTokenAccountScanWorkItems[panelId] = workItem
+        DispatchQueue.global(qos: .utility).async(execute: workItem)
+    }
+
+    private nonisolated static func inferTmuxTokenAccountLabel(sessionName: String) -> String? {
+        let trimmedSession = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSession.isEmpty else { return nil }
+        guard let tmux = resolvedTmuxExecutablePath() else { return nil }
+
+        let script = """
+        set -e
+        session=\(tmuxShellSingleQuoted(trimmedSession))
+        tty="$("\(tmux)" list-panes -t "$session" -F '#{pane_active}|#{pane_tty}' 2>/dev/null | awk -F '|' '$1 == "1" { print $2; exit }')"
+        [ -n "$tty" ] || exit 0
+        ps eww -t "${tty##/dev/}" 2>/dev/null || true
+        """
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", script]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return nil }
+        return inferredTokenAccountLabel(fromProcessEnvironmentText: text)
+    }
+
+    private nonisolated static func inferRemoteTmuxTokenAccountLabel(context: RemoteTmuxContext) -> String? {
+        let trimmedHost = context.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSession = context.sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedHost.isEmpty, !trimmedSession.isEmpty else { return nil }
+
+        let remoteScript = """
+        set -e
+        session=\(tmuxShellSingleQuoted(trimmedSession))
+        tty="$(tmux list-panes -t "$session" -F '#{pane_active}|#{pane_tty}' 2>/dev/null | awk -F '|' '$1 == "1" { print $2; exit }')"
+        [ -n "$tty" ] || exit 0
+        ps eww -t "${tty##/dev/}" 2>/dev/null || true
+        """
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = [
+            "-lc",
+            "ssh -o BatchMode=yes -o ConnectTimeout=3 \(tmuxShellSingleQuoted(trimmedHost)) \(tmuxShellSingleQuoted(remoteScript))"
+        ]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return nil }
+        return inferredTokenAccountLabel(fromProcessEnvironmentText: text)
+    }
+
+    private nonisolated static func inferredTokenAccountLabel(fromProcessEnvironmentText text: String) -> String? {
+        for line in text.components(separatedBy: .newlines) {
+            guard line.localizedCaseInsensitiveContains("codex")
+                    || line.localizedCaseInsensitiveContains("claude")
+                    || line.contains("CODEX_HOME=")
+                    || line.contains("CLAUDE_CONFIG_DIR=")
+                    || line.contains("CLAUDE_ACCOUNT_LABEL=") else {
+                continue
+            }
+
+            if let label = firstEnvironmentValue(named: "CLAUDE_ACCOUNT_LABEL", in: line),
+               let normalized = normalizedTokenAccountLabel(label) {
+                return normalized
+            }
+            if let codexHome = firstEnvironmentValue(named: "CODEX_HOME", in: line),
+               let label = accountLabel(fromDirectoryPath: codexHome, baseName: ".codex", prefix: "C") {
+                return label
+            }
+            if let claudeDir = firstEnvironmentValue(named: "CLAUDE_CONFIG_DIR", in: line),
+               let label = accountLabel(fromDirectoryPath: claudeDir, baseName: ".claude", prefix: "A") {
+                return label
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func firstEnvironmentValue(named name: String, in line: String) -> String? {
+        let marker = "\(name)="
+        guard let range = line.range(of: marker) else { return nil }
+        let tail = line[range.upperBound...]
+        let value = tail.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private nonisolated static func accountLabel(fromDirectoryPath path: String, baseName: String, prefix: String) -> String? {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        guard name.hasPrefix(baseName) else { return nil }
+        let suffix = String(name.dropFirst(baseName.count))
+        if suffix.isEmpty { return "\(prefix)1" }
+        guard let number = Int(suffix), (2...9).contains(number) else { return nil }
+        return "\(prefix)\(number)"
     }
 
     func isPanelPinned(_ panelId: UUID) -> Bool {
@@ -8950,6 +9288,11 @@ final class Workspace: Identifiable, ObservableObject {
         panelTitles = panelTitles.filter { validSurfaceIds.contains($0.key) }
         panelCustomTitles = panelCustomTitles.filter { validSurfaceIds.contains($0.key) }
         panelCustomColors = panelCustomColors.filter { validSurfaceIds.contains($0.key) }
+        panelTokenAccountLabels = panelTokenAccountLabels.filter { validSurfaceIds.contains($0.key) }
+        panelRemoteTmuxContexts = panelRemoteTmuxContexts.filter { validSurfaceIds.contains($0.key) }
+        for panelId in Array(tmuxTokenAccountScanWorkItems.keys) where !validSurfaceIds.contains(panelId) {
+            tmuxTokenAccountScanWorkItems.removeValue(forKey: panelId)?.cancel()
+        }
         pinnedPanelIds = pinnedPanelIds.filter { validSurfaceIds.contains($0) }
         manualUnreadPanelIds = manualUnreadPanelIds.filter { validSurfaceIds.contains($0) }
         panelGitBranches = panelGitBranches.filter { validSurfaceIds.contains($0.key) }
@@ -13747,6 +14090,9 @@ extension Workspace: BonsplitDelegate {
         panelTitles.removeValue(forKey: panelId)
         panelCustomTitles.removeValue(forKey: panelId)
         panelCustomColors.removeValue(forKey: panelId)
+        panelTokenAccountLabels.removeValue(forKey: panelId)
+        panelRemoteTmuxContexts.removeValue(forKey: panelId)
+        tmuxTokenAccountScanWorkItems.removeValue(forKey: panelId)?.cancel()
         pinnedPanelIds.remove(panelId)
         manualUnreadPanelIds.remove(panelId)
         manualUnreadMarkedAt.removeValue(forKey: panelId)
