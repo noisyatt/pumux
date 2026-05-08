@@ -261,22 +261,22 @@ enum WorkspaceTabColorSettings {
     private static let legacyCustomColorsKey = "workspaceTabColor.customColors"
 
     private static let originalPRPalette: [WorkspaceTabColorEntry] = [
-        WorkspaceTabColorEntry(name: "Red", hex: "#C0392B"),
-        WorkspaceTabColorEntry(name: "Crimson", hex: "#922B21"),
-        WorkspaceTabColorEntry(name: "Orange", hex: "#A04000"),
-        WorkspaceTabColorEntry(name: "Amber", hex: "#7D6608"),
-        WorkspaceTabColorEntry(name: "Olive", hex: "#4A5C18"),
-        WorkspaceTabColorEntry(name: "Green", hex: "#196F3D"),
-        WorkspaceTabColorEntry(name: "Teal", hex: "#006B6B"),
-        WorkspaceTabColorEntry(name: "Aqua", hex: "#0E6B8C"),
-        WorkspaceTabColorEntry(name: "Blue", hex: "#1565C0"),
-        WorkspaceTabColorEntry(name: "Navy", hex: "#1A5276"),
-        WorkspaceTabColorEntry(name: "Indigo", hex: "#283593"),
-        WorkspaceTabColorEntry(name: "Purple", hex: "#6A1B9A"),
-        WorkspaceTabColorEntry(name: "Magenta", hex: "#AD1457"),
-        WorkspaceTabColorEntry(name: "Rose", hex: "#880E4F"),
-        WorkspaceTabColorEntry(name: "Brown", hex: "#7B3F00"),
-        WorkspaceTabColorEntry(name: "Charcoal", hex: "#3E4B5E"),
+        WorkspaceTabColorEntry(name: "Red", hex: "#E74856"),
+        WorkspaceTabColorEntry(name: "Crimson", hex: "#C50F1F"),
+        WorkspaceTabColorEntry(name: "Orange", hex: "#F7630C"),
+        WorkspaceTabColorEntry(name: "Amber", hex: "#FFB900"),
+        WorkspaceTabColorEntry(name: "Olive", hex: "#8CBD18"),
+        WorkspaceTabColorEntry(name: "Green", hex: "#16C60C"),
+        WorkspaceTabColorEntry(name: "Teal", hex: "#00B7C3"),
+        WorkspaceTabColorEntry(name: "Aqua", hex: "#3A96DD"),
+        WorkspaceTabColorEntry(name: "Blue", hex: "#0078D4"),
+        WorkspaceTabColorEntry(name: "Navy", hex: "#0037DA"),
+        WorkspaceTabColorEntry(name: "Indigo", hex: "#5C2D91"),
+        WorkspaceTabColorEntry(name: "Purple", hex: "#744DA9"),
+        WorkspaceTabColorEntry(name: "Magenta", hex: "#E3008C"),
+        WorkspaceTabColorEntry(name: "Rose", hex: "#EA005E"),
+        WorkspaceTabColorEntry(name: "Brown", hex: "#CA5010"),
+        WorkspaceTabColorEntry(name: "Charcoal", hex: "#68768A"),
     ]
 
     static var defaultPalette: [WorkspaceTabColorEntry] {
@@ -5335,6 +5335,28 @@ class TabManager: ObservableObject {
     func newSurface(initialInput: String) {
         selectedWorkspace?.clearSplitZoom()
         selectedWorkspace?.newTerminalSurfaceInFocusedPane(focus: true, initialInput: initialInput)
+    }
+
+    @discardableResult
+    func newManagedTmuxSurface(sessionName: String) -> Bool {
+        selectedWorkspace?.clearSplitZoom()
+        return selectedWorkspace?.newManagedTmuxSurfaceInFocusedPane(sessionName: sessionName, focus: true) != nil
+    }
+
+    func focusedManagedTmuxSessionName() -> String? {
+        selectedWorkspace?.focusedManagedTmuxSessionName()
+    }
+
+    @discardableResult
+    func renameFocusedManagedTmuxSession(to newName: String) -> Bool {
+        selectedWorkspace?.renameFocusedManagedTmuxSession(to: newName) ?? false
+    }
+
+    @discardableResult
+    func promptSetFocusedPanelColor() -> Bool {
+        guard let selectedWorkspace else { return false }
+        selectedWorkspace.promptSetFocusedPanelColor()
+        return true
     }
 
     // MARK: - Split Creation

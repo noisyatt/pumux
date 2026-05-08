@@ -1000,6 +1000,60 @@ private func cmuxPathCandidatesContainingColumn(
     return candidates
 }
 
+private let cmuxTerminalURLLeadingWrappers: Set<Character> = [
+    "(", "[", "{", "<", "\"", "'", "“", "‘"
+]
+
+private func cmuxTrimTerminalURLToken(_ token: String) -> String {
+    var characters = Array(cmuxTrimTerminalPathTrailingPunctuation(
+        token.trimmingCharacters(in: .whitespacesAndNewlines)
+    ))
+
+    while let first = characters.first,
+          cmuxTerminalURLLeadingWrappers.contains(first) {
+        characters.removeFirst()
+    }
+
+    return String(characters)
+}
+
+private func cmuxURLCandidatesContainingColumn(
+    in line: String,
+    column: Int
+) -> [String] {
+    var candidates: [String] = []
+
+    func append(_ candidate: String?) {
+        guard let candidate else { return }
+        let trimmed = cmuxTrimTerminalURLToken(candidate)
+        let lowercased = trimmed.lowercased()
+        guard lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://") else { return }
+        guard !candidates.contains(trimmed) else { return }
+        candidates.append(trimmed)
+    }
+
+    for candidate in cmuxPathCandidatesContainingColumn(in: line, column: column) {
+        append(candidate)
+    }
+
+    return candidates
+}
+
+private func cmuxResolveVisibleLineURL(
+    _ line: String,
+    column: Int
+) -> TerminalOpenURLTarget? {
+    for rawToken in cmuxURLCandidatesContainingColumn(in: line, column: column) {
+        guard let target = resolveTerminalOpenURLTarget(rawToken),
+              let scheme = target.url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            continue
+        }
+        return target
+    }
+    return nil
+}
+
 private func cmuxResolveVisibleLinePath(
     _ line: String,
     column: Int,
@@ -4191,7 +4245,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
     private let configTemplate: CmuxSurfaceConfigTemplate?
     private let workingDirectory: String?
     private let initialCommand: String?
-    private let tmuxStartCommand: String?
+    private var tmuxStartCommand: String?
     private let initialInput: String?
     private let initialEnvironmentOverrides: [String: String]
     var requestedWorkingDirectory: String? { workingDirectory }
@@ -4393,6 +4447,11 @@ final class TerminalSurface: Identifiable, ObservableObject {
 
     func debugTmuxStartCommand() -> String? {
         tmuxStartCommand
+    }
+
+    func updateTmuxStartCommand(_ command: String?) {
+        let trimmedCommand = command?.trimmingCharacters(in: .whitespacesAndNewlines)
+        tmuxStartCommand = (trimmedCommand?.isEmpty == false) ? trimmedCommand : nil
     }
 
     func debugPortalHostLease() -> (hostId: String?, paneId: UUID?, inWindow: Bool?, area: CGFloat?) {
@@ -8456,6 +8515,59 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         )
     }
 
+    private func resolveVisibleURL(at point: NSPoint) -> TerminalOpenURLTarget? {
+        guard let panel = terminalSurface.flatMap({ $0.owningWorkspace()?.terminalPanel(for: $0.id) }),
+              let surface else {
+            return nil
+        }
+
+        let size = ghostty_surface_size(surface)
+        let rows = max(Int(size.rows), 1)
+        let cols = max(Int(size.columns), 1)
+        let resolvedCellWidth = cellSize.width > 0 ? cellSize.width : CGFloat(size.cell_width_px)
+        let resolvedCellHeight = cellSize.height > 0 ? cellSize.height : CGFloat(size.cell_height_px)
+        guard resolvedCellWidth > 0, resolvedCellHeight > 0 else { return nil }
+
+        let visibleText = TerminalController.shared.readTerminalTextForSnapshot(
+            terminalPanel: panel,
+            lineLimit: max(200, rows * 4)
+        ) ?? ""
+        let visibleLines = cmuxVisibleTerminalLines(from: visibleText, rows: rows)
+        let rowOffset = max(0, rows - visibleLines.count)
+        let xInset = max(0, (bounds.width - (CGFloat(cols) * resolvedCellWidth)) / 2)
+        let yInset = max(0, (bounds.height - (CGFloat(rows) * resolvedCellHeight)) / 2)
+
+        let yFromTop = bounds.height - point.y
+        let rowFromTop = max(0, min(rows - 1, Int((yFromTop - yInset) / resolvedCellHeight)))
+        let visibleRow = rowFromTop - rowOffset
+        guard visibleRow >= 0, visibleRow < visibleLines.count else { return nil }
+
+        let column = max(0, min(cols - 1, Int((point.x - xInset) / resolvedCellWidth)))
+        return cmuxResolveVisibleLineURL(visibleLines[visibleRow], column: column)
+    }
+
+    @discardableResult
+    private func openVisibleURLIfNeeded(
+        at point: NSPoint?,
+        modifierFlags: NSEvent.ModifierFlags
+    ) -> Bool {
+        let linkModifierHeld = modifierFlags.contains(.command) || modifierFlags.contains(.control)
+        guard linkModifierHeld,
+              let surface,
+              let resolvedPoint = preferredPointerPoint(from: point),
+              !ghostty_surface_has_selection(surface) else {
+            return false
+        }
+
+        guard let target = resolveVisibleURL(at: resolvedPoint) else { return false }
+
+        #if DEBUG
+        cmuxDebugLog("link.visibleURLFallback opening url=\(target.url)")
+        #endif
+        NSWorkspace.shared.open(target.url)
+        return true
+    }
+
     @discardableResult
     private func handleCommandClickRelease(
         at point: NSPoint,
@@ -8465,10 +8577,11 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         guard let surface else { return nil }
         let suppressCommandPathHover = shouldSuppressCommandPathHover(for: modifierFlags)
         let cmdHeld = modifierFlags.contains(.command)
+        let ctrlHeld = modifierFlags.contains(.control)
         let resolvedPoint = preferredPointerPoint(from: point)
-        guard cmdHeld, !suppressCommandPathHover else {
+        guard cmdHeld || ctrlHeld, !suppressCommandPathHover else {
 #if DEBUG
-            if cmdHeld || suppressCommandPathHover {
+            if cmdHeld || ctrlHeld || suppressCommandPathHover {
                 runtimeDebugLog(
                     hypothesisID: "h1",
                     name: "command_click_release",
@@ -8486,6 +8599,10 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                 )
             }
 #endif
+            return nil
+        }
+
+        if openVisibleURLIfNeeded(at: resolvedPoint, modifierFlags: modifierFlags) {
             return nil
         }
 
@@ -8734,6 +8851,13 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     override func rightMouseUp(with event: NSEvent) {
         guard let surface = surface else { return }
         if !ghostty_surface_mouse_captured(surface) {
+            if event.modifierFlags.contains(.control),
+               openVisibleURLIfNeeded(
+                at: convert(event.locationInWindow, from: nil),
+                modifierFlags: event.modifierFlags
+               ) {
+                return
+            }
             super.rightMouseUp(with: event)
             return
         }

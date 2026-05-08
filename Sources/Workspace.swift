@@ -40,6 +40,67 @@ private final class WorkspacePendingTerminalInputObserver: @unchecked Sendable {
     var observer: NSObjectProtocol?
 }
 
+private final class TabColorSwatchButton: NSButton {
+    let colorHex: String
+
+    var onSelect: ((String) -> Void)?
+    var isSelectedColor = false {
+        didSet { updateBorder() }
+    }
+
+    init(entry: WorkspaceTabColorEntry) {
+        self.colorHex = entry.hex
+        super.init(frame: NSRect(x: 0, y: 0, width: 28, height: 24))
+        title = ""
+        bezelStyle = .shadowlessSquare
+        isBordered = false
+        wantsLayer = true
+        toolTip = "\(entry.name) \(entry.hex)"
+        setButtonType(.momentaryChange)
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 28).isActive = true
+        heightAnchor.constraint(equalToConstant: 24).isActive = true
+        layer?.cornerRadius = 5
+        layer?.backgroundColor = NSColor(hex: entry.hex)?.cgColor
+        updateBorder()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onSelect?(colorHex)
+    }
+
+    private func updateBorder() {
+        layer?.borderWidth = isSelectedColor ? 3 : 1
+        layer?.borderColor = (isSelectedColor ? NSColor.controlAccentColor : NSColor.separatorColor).cgColor
+    }
+}
+
+private final class TabColorDialogButton: NSButton {
+    var onClick: (() -> Void)?
+
+    init(title: String, bezelStyle: NSButton.BezelStyle = .rounded) {
+        super.init(frame: .zero)
+        self.title = title
+        self.bezelStyle = bezelStyle
+        target = self
+        action = #selector(handleClick)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func handleClick() {
+        onClick?()
+    }
+}
+
 struct SidebarStatusEntry: Equatable {
     let key: String
     let value: String
@@ -524,11 +585,67 @@ extension Workspace {
 
     nonisolated static func restorableTmuxStartCommand(_ rawCommand: String?) -> String? {
         guard let command = rawCommand?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !command.isEmpty,
-              terminalCommandLooksLikeOMXHud(command) else {
+              !command.isEmpty else {
+            return nil
+        }
+        guard terminalCommandLooksLikeOMXHud(command) || terminalCommandLooksLikeManagedTmux(command) else {
             return nil
         }
         return command
+    }
+
+    nonisolated static func managedTmuxStartCommand(sessionName: String) -> String? {
+        let trimmedName = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return nil }
+        let executable = resolvedTmuxExecutablePath() ?? "tmux"
+        return "\(tmuxShellSingleQuoted(executable)) new-session -A -s \(tmuxShellSingleQuoted(trimmedName))"
+    }
+
+    nonisolated static func managedTmuxSessionName(from command: String?) -> String? {
+        guard let command = restorableTmuxStartCommand(command),
+              let markerRange = command.range(of: " -s ", options: .backwards) else {
+            return nil
+        }
+        let rawToken = command[markerRange.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawToken.isEmpty else { return nil }
+        let token: String
+        if rawToken.hasPrefix("'") {
+            guard let closingQuote = rawToken.dropFirst().firstIndex(of: "'") else { return nil }
+            token = String(rawToken[rawToken.index(after: rawToken.startIndex)..<closingQuote])
+                .replacingOccurrences(of: "'\"'\"'", with: "'")
+        } else {
+            token = rawToken.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+        }
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedToken.isEmpty ? nil : trimmedToken
+    }
+
+    nonisolated static func renameManagedTmuxSession(from oldName: String, to newName: String) -> Bool {
+        let trimmedOldName = oldName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedNewName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedOldName.isEmpty, !trimmedNewName.isEmpty else { return false }
+        guard trimmedOldName != trimmedNewName else { return true }
+
+        let executable = resolvedTmuxExecutablePath() ?? "tmux"
+        let command = [
+            tmuxShellSingleQuoted(executable),
+            "rename-session",
+            "-t",
+            tmuxShellSingleQuoted(trimmedOldName),
+            tmuxShellSingleQuoted(trimmedNewName)
+        ].joined(separator: " ")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", command]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
     }
 
     private nonisolated static func terminalCommandLooksLikeOMXHud(_ command: String) -> Bool {
@@ -539,10 +656,31 @@ extension Workspace {
         return lowered.contains("omx") || lowered.contains("oh-my-codex")
     }
 
+    private nonisolated static func terminalCommandLooksLikeManagedTmux(_ command: String) -> Bool {
+        let lowered = command.lowercased()
+        return terminalCommandTextContainsWord(lowered, word: "tmux")
+            && lowered.contains("new-session")
+            && lowered.contains("-a")
+            && lowered.contains("-s")
+    }
+
     private nonisolated static func terminalCommandTextContainsWord(_ command: String, word: String) -> Bool {
         let escapedWord = NSRegularExpression.escapedPattern(for: word)
         let pattern = "(^|[^A-Za-z0-9_-])\(escapedWord)([^A-Za-z0-9_-]|$)"
         return command.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private nonisolated static func resolvedTmuxExecutablePath() -> String? {
+        let candidates = [
+            "/opt/homebrew/bin/tmux",
+            "/usr/local/bin/tmux",
+            "/usr/bin/tmux"
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    private nonisolated static func tmuxShellSingleQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
 
     nonisolated static func shouldPersistSessionScrollback(
@@ -11534,6 +11672,61 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     @discardableResult
+    func newManagedTmuxSurfaceInFocusedPane(sessionName: String, focus: Bool? = true) -> TerminalPanel? {
+        guard let focusedPaneId = bonsplitController.focusedPaneId else { return nil }
+        let trimmedName = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty,
+              let tmuxStartCommand = Self.managedTmuxStartCommand(sessionName: trimmedName) else {
+            return nil
+        }
+        let workingDirectory = currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        let startupScript = SessionRestoredTerminalCommandStore.writeLauncherScript(
+            command: tmuxStartCommand,
+            workingDirectory: workingDirectory.isEmpty ? nil : workingDirectory
+        )
+        guard let startupScript else { return nil }
+        let panel = newTerminalSurface(
+            inPane: focusedPaneId,
+            focus: focus,
+            workingDirectory: workingDirectory.isEmpty ? nil : workingDirectory,
+            initialCommand: startupScript.path,
+            tmuxStartCommand: tmuxStartCommand
+        )
+        if let panel {
+            setPanelCustomTitle(panelId: panel.id, title: "tmux: \(trimmedName)")
+        }
+        return panel
+    }
+
+    func focusedManagedTmuxSessionName() -> String? {
+        guard let focusedPanelId,
+              let terminalPanel = terminalPanel(for: focusedPanelId) else {
+            return nil
+        }
+        return Self.managedTmuxSessionName(from: terminalPanel.tmuxStartCommand)
+    }
+
+    @discardableResult
+    func renameFocusedManagedTmuxSession(to newName: String) -> Bool {
+        guard let focusedPanelId,
+              let terminalPanel = terminalPanel(for: focusedPanelId),
+              let oldName = Self.managedTmuxSessionName(from: terminalPanel.tmuxStartCommand) else {
+            return false
+        }
+        let trimmedNewName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedNewName.isEmpty,
+              let tmuxStartCommand = Self.managedTmuxStartCommand(sessionName: trimmedNewName) else {
+            return false
+        }
+        guard Self.renameManagedTmuxSession(from: oldName, to: trimmedNewName) else {
+            return false
+        }
+        terminalPanel.updateTmuxStartCommand(tmuxStartCommand)
+        setPanelCustomTitle(panelId: focusedPanelId, title: "tmux: \(trimmedNewName)")
+        return true
+    }
+
+    @discardableResult
     func clearSplitZoom() -> Bool {
         bonsplitController.clearPaneZoom()
     }
@@ -11567,6 +11760,7 @@ final class Workspace: Identifiable, ObservableObject {
         var shortcuts: [TabContextAction: KeyboardShortcut] = [:]
         let mappings: [(TabContextAction, KeyboardShortcutSettings.Action)] = [
             (.rename, .renameTab),
+            (.setColor, .setTabColor),
             (.toggleZoom, .toggleSplitZoom),
             (.newTerminalToRight, .newSurface),
         ]
@@ -12498,24 +12692,155 @@ final class Workspace: Identifiable, ObservableObject {
         guard let panelId = panelIdFromSurfaceId(tabId),
               panels[panelId] != nil else { return }
 
-        let alert = NSAlert()
-        alert.messageText = String(localized: "alert.tabColor.title", defaultValue: "Tab Color")
-        alert.informativeText = String(localized: "alert.tabColor.message", defaultValue: "Enter a color name or #RRGGBB value for this tab.")
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 330),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = String(localized: "alert.tabColor.title", defaultValue: "Tab Color")
+        panel.isReleasedWhenClosed = false
+        panel.level = .modalPanel
+
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 330))
+        panel.contentView = contentView
+
+        let titleLabel = NSTextField(labelWithString: String(localized: "alert.tabColor.title", defaultValue: "Tab Color"))
+        titleLabel.font = .boldSystemFont(ofSize: 15)
+        titleLabel.frame = NSRect(x: 28, y: 278, width: 304, height: 22)
+        contentView.addSubview(titleLabel)
+
+        let message = NSTextField(
+            wrappingLabelWithString: String(
+                localized: "alert.tabColor.message",
+                defaultValue: "Choose a color or enter a color name / #RRGGBB value for this tab."
+            )
+        )
+        message.font = .systemFont(ofSize: 12)
+        message.textColor = .secondaryLabelColor
+        message.frame = NSRect(x: 28, y: 238, width: 304, height: 38)
+        contentView.addSubview(message)
+
         let input = NSTextField(string: panelCustomColors[panelId] ?? "")
         input.placeholderString = String(localized: "alert.tabColor.placeholder", defaultValue: "blue or #4A90E2")
-        input.frame = NSRect(x: 0, y: 0, width: 240, height: 22)
-        alert.accessoryView = input
-        alert.addButton(withTitle: String(localized: "alert.tabColor.apply", defaultValue: "Apply"))
-        alert.addButton(withTitle: String(localized: "alert.cancel", defaultValue: "Cancel"))
-        let alertWindow = alert.window
-        alertWindow.initialFirstResponder = input
+        input.frame = NSRect(x: 28, y: 205, width: 304, height: 24)
+        contentView.addSubview(input)
+
+        let swatchGrid = NSStackView()
+        swatchGrid.orientation = .vertical
+        swatchGrid.spacing = 10
+        swatchGrid.alignment = .centerX
+        swatchGrid.translatesAutoresizingMaskIntoConstraints = true
+        swatchGrid.frame = NSRect(x: 114, y: 96, width: 132, height: 94)
+
+        let palette = Self.defaultTabColorDialogPalette()
+        var buttons: [TabColorSwatchButton] = []
+        for rowIndex in 0..<3 {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.spacing = 10
+            row.translatesAutoresizingMaskIntoConstraints = true
+            row.frame = NSRect(x: 0, y: 0, width: 104, height: 24)
+            for columnIndex in 0..<3 {
+                let entry = palette[rowIndex * 3 + columnIndex]
+                let button = TabColorSwatchButton(entry: entry)
+                button.onSelect = { [weak input, weak button] color in
+                    input?.stringValue = color
+                    buttons.forEach { swatch in
+                        swatch.isSelectedColor = swatch === button
+                    }
+                }
+                buttons.append(button)
+                row.addArrangedSubview(button)
+            }
+            swatchGrid.addArrangedSubview(row)
+        }
+        contentView.addSubview(swatchGrid)
+
+        if let current = WorkspaceTabColorSettings.resolvedColorHex(input.stringValue) {
+            for button in buttons {
+                button.isSelectedColor = button.colorHex.caseInsensitiveCompare(current) == .orderedSame
+            }
+        }
+
+        var response: NSApplication.ModalResponse = .cancel
+        func finish(_ nextResponse: NSApplication.ModalResponse) {
+            response = nextResponse
+            NSApp.stopModal()
+            panel.close()
+        }
+
+        let applyButton = TabColorDialogButton(
+            title: String(localized: "alert.tabColor.apply", defaultValue: "Apply"),
+            bezelStyle: .rounded
+        )
+        applyButton.frame = NSRect(x: 28, y: 50, width: 96, height: 30)
+        applyButton.keyEquivalent = "\r"
+        applyButton.onClick = { finish(.OK) }
+        contentView.addSubview(applyButton)
+
+        let clearButton = TabColorDialogButton(
+            title: String(localized: "alert.tabColor.clear", defaultValue: "Clear"),
+            bezelStyle: .rounded
+        )
+        clearButton.frame = NSRect(x: 132, y: 50, width: 96, height: 30)
+        clearButton.onClick = { finish(.continue) }
+        contentView.addSubview(clearButton)
+
+        let cancelButton = TabColorDialogButton(
+            title: String(localized: "alert.cancel", defaultValue: "Cancel"),
+            bezelStyle: .rounded
+        )
+        cancelButton.frame = NSRect(x: 236, y: 50, width: 96, height: 30)
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.onClick = { finish(.cancel) }
+        contentView.addSubview(cancelButton)
+
+        panel.defaultButtonCell = applyButton.cell as? NSButtonCell
+        panel.initialFirstResponder = input
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
         DispatchQueue.main.async {
-            alertWindow.makeFirstResponder(input)
+            panel.makeFirstResponder(input)
             input.selectText(nil)
         }
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else { return }
-        setPanelCustomColor(panelId: panelId, color: input.stringValue)
+        _ = NSApp.runModal(for: panel)
+
+        switch response {
+        case .OK:
+            setPanelCustomColor(panelId: panelId, color: input.stringValue)
+        case .continue:
+            setPanelCustomColor(panelId: panelId, color: nil)
+        default:
+            return
+        }
+    }
+
+    func promptSetFocusedPanelColor() {
+        guard let focusedPanelId,
+              let tabId = surfaceIdFromPanelId(focusedPanelId) else { return }
+        promptSetPanelColor(tabId: tabId)
+    }
+
+    private static func defaultTabColorDialogPalette() -> [WorkspaceTabColorEntry] {
+        let palette = WorkspaceTabColorSettings.palette()
+        let preferredNames = [
+            "Red", "Orange", "Amber",
+            "Green", "Teal", "Blue",
+            "Purple", "Magenta", "Charcoal"
+        ]
+        let preferred = preferredNames.compactMap { name in
+            palette.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        }
+        if preferred.count == 9 {
+            return preferred
+        }
+        let fallback = WorkspaceTabColorSettings.defaultPalette.prefix(9)
+        return Array(preferred + fallback).reduce(into: []) { result, entry in
+            if !result.contains(where: { $0.hex.caseInsensitiveCompare(entry.hex) == .orderedSame }) {
+                result.append(entry)
+            }
+        }.prefix(9).map { $0 }
     }
 
     private static let bonsplitMoveNewWorkspaceDestinationId = "new-workspace"

@@ -11506,9 +11506,9 @@ private final class SidebarTokenManagerUsageStore: ObservableObject {
 
     private static func makeSnapshotsURL(environment: [String: String]) -> URL {
         let rawBase = environment["TOKENMANAGER_URL"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = (rawBase?.isEmpty == false ? rawBase! : "http://Daniel-macmini.local:3101")
+        let base = (rawBase?.isEmpty == false ? rawBase! : "http://192.168.101.4:3101")
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        return URL(string: base + "/snapshots") ?? URL(string: "http://Daniel-macmini.local:3101/snapshots")!
+        return URL(string: base + "/snapshots") ?? URL(string: "http://192.168.101.4:3101/snapshots")!
     }
 }
 

@@ -71,6 +71,10 @@ final class TerminalPanel: Panel, ObservableObject {
         surface.requestedWorkingDirectory
     }
 
+    var tmuxStartCommand: String? {
+        surface.debugTmuxStartCommand()
+    }
+
     init(workspaceId: UUID, surface: TerminalSurface) {
         self.id = surface.id
         self.workspaceId = workspaceId
@@ -128,6 +132,10 @@ final class TerminalPanel: Panel, ObservableObject {
         if !trimmed.isEmpty && directory != trimmed {
             directory = trimmed
         }
+    }
+
+    func updateTmuxStartCommand(_ command: String?) {
+        surface.updateTmuxStartCommand(command)
     }
 
     func updateWorkspaceId(_ newWorkspaceId: UUID) {

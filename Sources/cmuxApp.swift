@@ -544,6 +544,32 @@ struct cmuxApp: App {
                     workspaceCommandMenuContent(manager: activeTabManager)
                 }
 
+                Menu("tmux") {
+                    Button("New / Attach tmux Tab…") {
+                        AppDelegate.shared?.promptNewTmuxTab(preferredWindow: NSApp.keyWindow ?? NSApp.mainWindow)
+                    }
+
+                    Button("Rename Current tmux Session…") {
+                        AppDelegate.shared?.promptRenameCurrentTmuxSession(preferredWindow: NSApp.keyWindow ?? NSApp.mainWindow)
+                    }
+
+                    let sessions = AppDelegate.shared?.currentTmuxSessionNamesForMenu() ?? []
+                    if sessions.isEmpty {
+                        Button("No tmux Sessions") {}
+                            .disabled(true)
+                    } else {
+                        Divider()
+                        ForEach(sessions, id: \.self) { session in
+                            Button(session) {
+                                _ = AppDelegate.shared?.newTmuxTab(
+                                    sessionName: session,
+                                    preferredWindow: NSApp.keyWindow ?? NSApp.mainWindow
+                                )
+                            }
+                        }
+                    }
+                }
+
                 splitCommandButton(title: String(localized: "menu.file.reopenPreviousSession", defaultValue: "Reopen Previous Session"), shortcut: menuShortcut(for: .reopenPreviousSession)) {
                     if AppDelegate.shared?.reopenPreviousSession() != true {
                         NSSound.beep()

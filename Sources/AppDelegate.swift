@@ -10,6 +10,27 @@ import Combine
 import ObjectiveC.runtime
 import Darwin
 
+private final class SessionProfileDialogButton: NSButton {
+    var onClick: (() -> Void)?
+
+    init(title: String, bezelStyle: NSButton.BezelStyle = .rounded) {
+        super.init(frame: .zero)
+        self.title = title
+        self.bezelStyle = bezelStyle
+        target = self
+        action = #selector(handleClick)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func handleClick() {
+        onClick?()
+    }
+}
+
 func cmuxJavaScriptStringLiteral(_ value: String?) -> String? {
     guard let value else { return nil }
     // Serialize as a JSON array, then strip the outer brackets to get a quoted JS string literal.
@@ -2692,43 +2713,284 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         SessionProfileStore.delete(name: name)
     }
 
-    func promptSaveSessionProfile() {
+    func currentTmuxSessionNamesForMenu() -> [String] {
+        Self.tmuxSessionNames()
+    }
+
+    @discardableResult
+    func newTmuxTab(sessionName: String, preferredWindow: NSWindow? = nil) -> Bool {
+        let trimmedName = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty,
+              let manager = activeTabManagerForCommands(preferredWindow: preferredWindow) else {
+            return false
+        }
+        return manager.newManagedTmuxSurface(sessionName: trimmedName)
+    }
+
+    func currentManagedTmuxSessionName(preferredWindow: NSWindow? = nil) -> String? {
+        activeTabManagerForCommands(preferredWindow: preferredWindow)?
+            .focusedManagedTmuxSessionName()
+    }
+
+    @discardableResult
+    func renameCurrentManagedTmuxSession(to newName: String, preferredWindow: NSWindow? = nil) -> Bool {
+        let trimmedName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty,
+              let manager = activeTabManagerForCommands(preferredWindow: preferredWindow) else {
+            return false
+        }
+        return manager.renameFocusedManagedTmuxSession(to: trimmedName)
+    }
+
+    func promptRenameCurrentTmuxSession(preferredWindow: NSWindow? = nil) {
+        let targetWindow = preferredWindow ?? NSApp.keyWindow ?? NSApp.mainWindow
+        guard let currentName = currentManagedTmuxSessionName(preferredWindow: targetWindow) else {
+            showSessionProfileMessage(
+                title: String(localized: "dialog.tmuxRename.unavailable.title", defaultValue: "No Managed tmux Session"),
+                message: String(localized: "dialog.tmuxRename.unavailable.message", defaultValue: "Focus a pumux-created tmux tab before renaming its session."),
+                style: .warning
+            )
+            return
+        }
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 220),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = String(localized: "dialog.tmuxRename.title", defaultValue: "Rename tmux Session")
+        panel.isReleasedWhenClosed = false
+        panel.level = .modalPanel
+
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 220))
+        panel.contentView = contentView
+
+        let titleLabel = NSTextField(labelWithString: String(localized: "dialog.tmuxRename.title", defaultValue: "Rename tmux Session"))
+        titleLabel.font = .boldSystemFont(ofSize: 15)
+        titleLabel.frame = NSRect(x: 28, y: 168, width: 344, height: 22)
+        contentView.addSubview(titleLabel)
+
+        let message = NSTextField(
+            wrappingLabelWithString: String(
+                localized: "dialog.tmuxRename.message",
+                defaultValue: "Rename the attached tmux session. The tab title and session restore command will be updated too."
+            )
+        )
+        message.font = .systemFont(ofSize: 12)
+        message.textColor = .secondaryLabelColor
+        message.frame = NSRect(x: 28, y: 124, width: 344, height: 38)
+        contentView.addSubview(message)
+
+        let input = NSTextField(string: currentName)
+        input.placeholderString = String(localized: "dialog.tmuxRename.placeholder", defaultValue: "Session name")
+        input.frame = NSRect(x: 28, y: 86, width: 344, height: 24)
+        contentView.addSubview(input)
+
+        var response: NSApplication.ModalResponse = .cancel
+        func finish(_ nextResponse: NSApplication.ModalResponse) {
+            response = nextResponse
+            NSApp.stopModal()
+            panel.close()
+        }
+
+        let renameButton = SessionProfileDialogButton(
+            title: String(localized: "dialog.tmuxRename.rename", defaultValue: "Rename"),
+            bezelStyle: .rounded
+        )
+        renameButton.frame = NSRect(x: 164, y: 34, width: 96, height: 30)
+        renameButton.keyEquivalent = "\r"
+        renameButton.onClick = { finish(.OK) }
+        contentView.addSubview(renameButton)
+
+        let cancelButton = SessionProfileDialogButton(
+            title: String(localized: "common.cancel", defaultValue: "Cancel"),
+            bezelStyle: .rounded
+        )
+        cancelButton.frame = NSRect(x: 276, y: 34, width: 96, height: 30)
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.onClick = { finish(.cancel) }
+        contentView.addSubview(cancelButton)
+
+        panel.defaultButtonCell = renameButton.cell as? NSButtonCell
+        panel.initialFirstResponder = input
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+        DispatchQueue.main.async {
+            panel.makeFirstResponder(input)
+            input.selectText(nil)
+        }
+
+        _ = NSApp.runModal(for: panel)
+        guard response == .OK else { return }
+
+        let newName = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newName.isEmpty else {
+            showSessionProfileMessage(
+                title: String(localized: "dialog.tmuxRename.invalid.title", defaultValue: "Session Name Required"),
+                message: String(localized: "dialog.tmuxRename.invalid.message", defaultValue: "Enter a tmux session name."),
+                style: .warning
+            )
+            return
+        }
+
+        if !renameCurrentManagedTmuxSession(to: newName, preferredWindow: targetWindow) {
+            showSessionProfileMessage(
+                title: String(localized: "dialog.tmuxRename.failed.title", defaultValue: "Could Not Rename tmux Session"),
+                message: String(localized: "dialog.tmuxRename.failed.message", defaultValue: "pumux could not rename the focused tmux session."),
+                style: .warning
+            )
+        }
+    }
+
+    func promptNewTmuxTab(preferredWindow: NSWindow? = nil) {
+        let sessions = Self.tmuxSessionNames()
         let alert = NSAlert()
-        alert.messageText = String(localized: "dialog.sessionProfile.save.title", defaultValue: "Save Session Profile")
+        alert.messageText = String(localized: "dialog.tmuxTab.title", defaultValue: "New tmux Tab")
         alert.informativeText = String(
-            localized: "dialog.sessionProfile.save.message",
-            defaultValue: "Save the current windows, workspaces, tabs, splits, and panel state as a named profile."
+            localized: "dialog.tmuxTab.message",
+            defaultValue: "Choose an existing tmux session or enter a new session name. pumux will attach with tmux new-session -A."
         )
 
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let input = NSTextField(string: "")
-        input.placeholderString = String(localized: "dialog.sessionProfile.name.placeholder", defaultValue: "Profile name")
-        input.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
-        stack.addArrangedSubview(input)
-
-        let includeScrollback = NSButton(
-            checkboxWithTitle: String(localized: "dialog.sessionProfile.includeScrollback", defaultValue: "Include terminal scrollback"),
-            target: nil,
-            action: nil
-        )
-        includeScrollback.state = .off
-        stack.addArrangedSubview(includeScrollback)
-
-        alert.accessoryView = stack
-        alert.addButton(withTitle: String(localized: "common.save", defaultValue: "Save"))
+        let input = NSComboBox(frame: NSRect(x: 0, y: 0, width: 320, height: 26))
+        input.usesDataSource = false
+        input.completes = true
+        input.addItems(withObjectValues: sessions)
+        input.placeholderString = String(localized: "dialog.tmuxTab.placeholder", defaultValue: "session name")
+        input.stringValue = sessions.first ?? "main"
+        alert.accessoryView = input
+        alert.addButton(withTitle: String(localized: "dialog.tmuxTab.attach", defaultValue: "Attach"))
         alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
 
         let alertWindow = alert.window
         alertWindow.initialFirstResponder = input
         DispatchQueue.main.async {
             alertWindow.makeFirstResponder(input)
+            input.selectText(nil)
         }
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let sessionName = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sessionName.isEmpty else {
+            showSessionProfileMessage(
+                title: String(localized: "dialog.tmuxTab.invalid.title", defaultValue: "Session Name Required"),
+                message: String(localized: "dialog.tmuxTab.invalid.message", defaultValue: "Enter a tmux session name."),
+                style: .warning
+            )
+            return
+        }
+
+        if !newTmuxTab(sessionName: sessionName, preferredWindow: preferredWindow) {
+            showSessionProfileMessage(
+                title: String(localized: "dialog.tmuxTab.failed.title", defaultValue: "Could Not Open tmux Tab"),
+                message: String(localized: "dialog.tmuxTab.failed.message", defaultValue: "pumux could not create or attach that tmux session."),
+                style: .warning
+            )
+        }
+    }
+
+    private static func tmuxSessionNames() -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", "tmux list-sessions -F '#S' 2>/dev/null"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return []
+        }
+        guard process.terminationStatus == 0 else { return [] }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let text = String(data: data, encoding: .utf8) ?? ""
+        return text
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    func promptSaveSessionProfile() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 250),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = String(localized: "dialog.sessionProfile.save.title", defaultValue: "Save Session Profile")
+        panel.isReleasedWhenClosed = false
+        panel.level = .modalPanel
+
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 250))
+        panel.contentView = contentView
+
+        let titleLabel = NSTextField(labelWithString: String(localized: "dialog.sessionProfile.save.title", defaultValue: "Save Session Profile"))
+        titleLabel.font = .boldSystemFont(ofSize: 15)
+        titleLabel.frame = NSRect(x: 28, y: 198, width: 344, height: 22)
+        contentView.addSubview(titleLabel)
+
+        let message = NSTextField(
+            wrappingLabelWithString: String(
+                localized: "dialog.sessionProfile.save.message",
+                defaultValue: "Save the current windows, workspaces, tabs, splits, and panel state as a named profile."
+            )
+        )
+        message.font = .systemFont(ofSize: 12)
+        message.textColor = .secondaryLabelColor
+        message.frame = NSRect(x: 28, y: 154, width: 344, height: 38)
+        contentView.addSubview(message)
+
+        let input = NSTextField(string: "")
+        input.placeholderString = String(localized: "dialog.sessionProfile.name.placeholder", defaultValue: "Profile name")
+        input.frame = NSRect(x: 28, y: 118, width: 344, height: 24)
+        contentView.addSubview(input)
+
+        let includeScrollback = NSButton(
+            checkboxWithTitle: String(localized: "dialog.sessionProfile.includeScrollback", defaultValue: "Include terminal scrollback"),
+            target: nil,
+            action: nil
+        )
+        includeScrollback.frame = NSRect(x: 28, y: 82, width: 344, height: 22)
+        includeScrollback.state = .off
+        contentView.addSubview(includeScrollback)
+
+        var response: NSApplication.ModalResponse = .cancel
+        func finish(_ nextResponse: NSApplication.ModalResponse) {
+            response = nextResponse
+            NSApp.stopModal()
+            panel.close()
+        }
+
+        let saveButton = SessionProfileDialogButton(
+            title: String(localized: "common.save", defaultValue: "Save"),
+            bezelStyle: .rounded
+        )
+        saveButton.frame = NSRect(x: 164, y: 34, width: 96, height: 30)
+        saveButton.keyEquivalent = "\r"
+        saveButton.onClick = { finish(.OK) }
+        contentView.addSubview(saveButton)
+
+        let cancelButton = SessionProfileDialogButton(
+            title: String(localized: "common.cancel", defaultValue: "Cancel"),
+            bezelStyle: .rounded
+        )
+        cancelButton.frame = NSRect(x: 276, y: 34, width: 96, height: 30)
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.onClick = { finish(.cancel) }
+        contentView.addSubview(cancelButton)
+
+        panel.defaultButtonCell = saveButton.cell as? NSButtonCell
+        panel.initialFirstResponder = input
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+        DispatchQueue.main.async {
+            panel.makeFirstResponder(input)
+        }
+
+        _ = NSApp.runModal(for: panel)
+        guard response == .OK else { return }
+
         let name = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard SessionProfileStore.validateName(name) != nil else {
             showSessionProfileMessage(
@@ -11460,6 +11722,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let targetWindow = commandPaletteTargetWindow ?? event.window ?? NSApp.keyWindow ?? NSApp.mainWindow
             requestCommandPaletteRenameTab(preferredWindow: targetWindow, source: "shortcut.renameTab")
             return true
+        }
+
+        if matchConfiguredShortcut(event: event, action: .setTabColor) {
+            let targetWindow = commandPaletteTargetWindow ?? event.window ?? NSApp.keyWindow ?? NSApp.mainWindow
+            let routedManager = activeTabManagerForCommands(preferredWindow: targetWindow) ?? tabManager
+            return routedManager?.promptSetFocusedPanelColor() ?? false
         }
 
         // Numeric shortcuts for specific workspaces (9 = last workspace)
