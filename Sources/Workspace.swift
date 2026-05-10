@@ -8724,7 +8724,11 @@ final class Workspace: Identifiable, ObservableObject {
         let script = """
         set -e
         session=\(tmuxShellSingleQuoted(trimmedSession))
-        tty="$("\(tmux)" list-panes -t "$session" -F '#{pane_active}|#{pane_tty}' 2>/dev/null | awk -F '|' '$1 == "1" { print $2; exit }')"
+        pane_line="$("\(tmux)" list-panes -t "$session" -F '#{pane_active}|#{pane_id}|#{pane_tty}' 2>/dev/null | awk -F '|' '$1 == "1" { print $2 "|" $3; exit }')"
+        pane_id="${pane_line%%|*}"
+        tty="${pane_line#*|}"
+        account="$([ -n "$pane_id" ] && "\(tmux)" display-message -p -t "$pane_id" '#{@pumux_ai_account}' 2>/dev/null || true)"
+        [ -n "$account" ] && printf 'PUMUX_AI_ACCOUNT=%s\n' "$account"
         [ -n "$tty" ] || exit 0
         ps eww -t "${tty##/dev/}" 2>/dev/null || true
         """
@@ -8756,7 +8760,11 @@ final class Workspace: Identifiable, ObservableObject {
         let remoteScript = """
         set -e
         session=\(tmuxShellSingleQuoted(trimmedSession))
-        tty="$(tmux list-panes -t "$session" -F '#{pane_active}|#{pane_tty}' 2>/dev/null | awk -F '|' '$1 == "1" { print $2; exit }')"
+        pane_line="$(tmux list-panes -t "$session" -F '#{pane_active}|#{pane_id}|#{pane_tty}' 2>/dev/null | awk -F '|' '$1 == "1" { print $2 "|" $3; exit }')"
+        pane_id="${pane_line%%|*}"
+        tty="${pane_line#*|}"
+        account="$([ -n "$pane_id" ] && tmux display-message -p -t "$pane_id" '#{@pumux_ai_account}' 2>/dev/null || true)"
+        [ -n "$account" ] && printf 'PUMUX_AI_ACCOUNT=%s\n' "$account"
         [ -n "$tty" ] || exit 0
         ps eww -t "${tty##/dev/}" 2>/dev/null || true
         """
@@ -8787,12 +8795,17 @@ final class Workspace: Identifiable, ObservableObject {
         for line in text.components(separatedBy: .newlines) {
             guard line.localizedCaseInsensitiveContains("codex")
                     || line.localizedCaseInsensitiveContains("claude")
+                    || line.contains("PUMUX_AI_ACCOUNT=")
                     || line.contains("CODEX_HOME=")
                     || line.contains("CLAUDE_CONFIG_DIR=")
                     || line.contains("CLAUDE_ACCOUNT_LABEL=") else {
                 continue
             }
 
+            if let label = firstEnvironmentValue(named: "PUMUX_AI_ACCOUNT", in: line),
+               let normalized = normalizedTokenAccountLabel(label) {
+                return normalized
+            }
             if let label = firstEnvironmentValue(named: "CLAUDE_ACCOUNT_LABEL", in: line),
                let normalized = normalizedTokenAccountLabel(label) {
                 return normalized
