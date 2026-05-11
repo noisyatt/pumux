@@ -11335,8 +11335,16 @@ private struct SidebarTokenManagerAccountRow: View {
         snapshot.rateLimit ?? SidebarTokenManagerRateLimit()
     }
 
+    private var geminiRows: [SidebarTokenManagerGeminiTierRow] {
+        SidebarTokenManagerGeminiTierRow.rows(for: snapshot)
+    }
+
     private var isDimmed: Bool {
-        rateLimit.fiveHourUtilization >= 1 ||
+        let tierRows = geminiRows
+        if !tierRows.isEmpty {
+            return tierRows.contains { $0.utilization >= 1 } || rateLimit.status == "rejected"
+        }
+        return rateLimit.fiveHourUtilization >= 1 ||
             rateLimit.sevenDayUtilization >= 1 ||
             rateLimit.status == "rejected"
     }
@@ -11361,16 +11369,26 @@ private struct SidebarTokenManagerAccountRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            usageRow(
-                label: "5H",
-                utilization: rateLimit.fiveHourUtilization,
-                resetEpoch: rateLimit.fiveHourReset ?? rateLimit.reset
-            )
-            usageRow(
-                label: "7D",
-                utilization: rateLimit.sevenDayUtilization,
-                resetEpoch: rateLimit.sevenDayReset
-            )
+            if geminiRows.isEmpty {
+                usageRow(
+                    label: "5H",
+                    utilization: rateLimit.fiveHourUtilization,
+                    resetEpoch: rateLimit.fiveHourReset ?? rateLimit.reset
+                )
+                usageRow(
+                    label: "7D",
+                    utilization: rateLimit.sevenDayUtilization,
+                    resetEpoch: rateLimit.sevenDayReset
+                )
+            } else {
+                ForEach(geminiRows) { row in
+                    usageRow(
+                        label: row.label,
+                        utilization: row.utilization,
+                        resetEpoch: row.resetAt
+                    )
+                }
+            }
         }
         .padding(.horizontal, 5)
         .padding(.vertical, 4)
@@ -11550,6 +11568,7 @@ private struct SidebarTokenManagerRateLimit: Decodable {
     let reset: Int64?
     let fiveHourReset: Int64?
     let sevenDayReset: Int64?
+    let modelBuckets: [SidebarTokenManagerModelBucket]?
 
     init(
         fiveHourUtilization: Double = 0,
@@ -11558,7 +11577,8 @@ private struct SidebarTokenManagerRateLimit: Decodable {
         status: String? = nil,
         reset: Int64? = nil,
         fiveHourReset: Int64? = nil,
-        sevenDayReset: Int64? = nil
+        sevenDayReset: Int64? = nil,
+        modelBuckets: [SidebarTokenManagerModelBucket]? = nil
     ) {
         self.fiveHourUtilization = fiveHourUtilization
         self.sevenDayUtilization = sevenDayUtilization
@@ -11567,6 +11587,78 @@ private struct SidebarTokenManagerRateLimit: Decodable {
         self.reset = reset
         self.fiveHourReset = fiveHourReset
         self.sevenDayReset = sevenDayReset
+        self.modelBuckets = modelBuckets
+    }
+}
+
+private struct SidebarTokenManagerModelBucket: Decodable {
+    let modelId: String
+    let tier: String?
+    let family: String?
+    let remainingFraction: Double
+    let resetAt: Int64?
+    let tokenType: String?
+}
+
+private struct SidebarTokenManagerGeminiTierRow: Identifiable {
+    let tier: String
+    let label: String
+    let utilization: Double
+    let resetAt: Int64?
+
+    var id: String { tier }
+
+    static func rows(for snapshot: SidebarTokenManagerSnapshot) -> [SidebarTokenManagerGeminiTierRow] {
+        guard snapshot.type == "gemini-oauth",
+              let buckets = snapshot.rateLimit?.modelBuckets,
+              !buckets.isEmpty else {
+            return []
+        }
+
+        var byTier: [String: SidebarTokenManagerGeminiTierRow] = [:]
+        for bucket in buckets {
+            guard let tier = tier(for: bucket), ["pro", "flash", "flash-lite"].contains(tier) else {
+                continue
+            }
+            let remaining = min(1, max(0, bucket.remainingFraction))
+            let row = SidebarTokenManagerGeminiTierRow(
+                tier: tier,
+                label: label(for: tier),
+                utilization: 1 - remaining,
+                resetAt: bucket.resetAt
+            )
+            if let current = byTier[tier] {
+                let rowReset = row.resetAt ?? Int64.max
+                let currentReset = current.resetAt ?? Int64.max
+                if row.utilization > current.utilization || (row.utilization == current.utilization && rowReset < currentReset) {
+                    byTier[tier] = row
+                }
+            } else {
+                byTier[tier] = row
+            }
+        }
+
+        return ["pro", "flash", "flash-lite"].compactMap { byTier[$0] }
+    }
+
+    private static func tier(for bucket: SidebarTokenManagerModelBucket) -> String? {
+        if let tier = bucket.tier, !tier.isEmpty {
+            return tier
+        }
+        let model = bucket.modelId.lowercased()
+        if model.contains("flash-lite") { return "flash-lite" }
+        if model.contains("flash") { return "flash" }
+        if model.contains("pro") { return "pro" }
+        return nil
+    }
+
+    private static func label(for tier: String) -> String {
+        switch tier {
+        case "pro": return "PRO"
+        case "flash": return "FLS"
+        case "flash-lite": return "LIT"
+        default: return tier.uppercased()
+        }
     }
 }
 
