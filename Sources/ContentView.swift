@@ -11654,9 +11654,9 @@ private struct SidebarTokenManagerGeminiTierRow: Identifiable {
 
     private static func label(for tier: String) -> String {
         switch tier {
-        case "pro": return "PRO"
-        case "flash": return "FLS"
-        case "flash-lite": return "LIT"
+        case "pro": return "PR"
+        case "flash": return "FL"
+        case "flash-lite": return "LT"
         default: return tier.uppercased()
         }
     }
