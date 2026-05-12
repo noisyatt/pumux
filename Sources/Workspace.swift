@@ -489,8 +489,12 @@ extension Workspace {
         switch panel.panelType {
         case .terminal:
             guard let terminalPanel = panel as? TerminalPanel else { return nil }
+            let explicitTmuxStartCommand = terminalPanel.surface.debugTmuxStartCommand()
+            let inferredRemoteTmuxStartCommand = Self.restorableRemoteTmuxStartCommand(
+                fromDisplayedCommandTitle: panelTitle ?? terminalPanel.displayTitle
+            )
             let restorableTmuxStartCommand = effectiveRestorableAgent == nil
-                ? Self.restorableTmuxStartCommand(terminalPanel.surface.debugTmuxStartCommand())
+                ? Self.restorableTmuxStartCommand(explicitTmuxStartCommand ?? inferredRemoteTmuxStartCommand)
                 : nil
             let shouldPersistScrollback = Self.shouldPersistSessionScrollback(
                 shellActivityState: panelShellActivityStates[panelId],
@@ -612,6 +616,25 @@ extension Workspace {
         guard !trimmedName.isEmpty else { return nil }
         let executable = resolvedTmuxExecutablePath() ?? "tmux"
         return "\(tmuxShellSingleQuoted(executable)) new-session -A -s \(tmuxShellSingleQuoted(trimmedName))"
+    }
+
+    private static func restorableRemoteTmuxStartCommand(fromDisplayedCommandTitle title: String?) -> String? {
+        guard let title,
+              let context = remoteTmuxContext(fromDisplayedCommandTitle: title) else {
+            return nil
+        }
+        return remoteTmuxStartCommand(context: context)
+    }
+
+    private static func remoteTmuxStartCommand(context: RemoteTmuxContext) -> String? {
+        let host = context.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionName = context.sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty, !sessionName.isEmpty else { return nil }
+        let tmuxCommand = "tmux new-session -A -s \(tmuxShellSingleQuoted(sessionName))"
+        if context.transport.caseInsensitiveCompare("mosh") == .orderedSame {
+            return "mosh \(tmuxShellSingleQuoted(host)) -- \(tmuxCommand)"
+        }
+        return "ssh \(tmuxShellSingleQuoted(host)) \(tmuxCommand)"
     }
 
     nonisolated static func managedTmuxSessionName(from command: String?) -> String? {
@@ -876,8 +899,11 @@ extension Workspace {
                 ?? currentDirectory
             let localWorkingDirectory = remoteTerminalStartupCommand() == nil ? workingDirectory : nil
             let restorableAgent = snapshot.terminal?.agent
+            let snapshotRemoteTmuxStartCommand = Self.restorableRemoteTmuxStartCommand(
+                fromDisplayedCommandTitle: snapshot.title ?? snapshot.customTitle
+            )
             let restorableTmuxStartCommand = restorableAgent == nil
-                ? Self.restorableTmuxStartCommand(snapshot.terminal?.tmuxStartCommand)
+                ? Self.restorableTmuxStartCommand(snapshot.terminal?.tmuxStartCommand ?? snapshotRemoteTmuxStartCommand)
                 : nil
             let restoredTmuxStartupScript = restorableTmuxStartCommand.flatMap {
                 SessionRestoredTerminalCommandStore.writeLauncherScript(
@@ -7138,7 +7164,7 @@ struct ClosedBrowserPanelRestoreSnapshot {
     let fallbackAnchorPaneId: UUID?
 }
 
-struct RemoteTmuxContext: Equatable {
+struct RemoteTmuxContext: Equatable, Sendable {
     let host: String
     let sessionName: String
     let transport: String
@@ -8334,34 +8360,270 @@ final class Workspace: Identifiable, ObservableObject {
         let trimmed = titleWithoutLeadingStatusPrefixes(title)
         guard !trimmed.isEmpty else { return nil }
 
-        if let match = trimmed.range(
-            of: #"^mt\s+([^\s]+)"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) {
-            let matched = String(trimmed[match])
-            let parts = matched.split(whereSeparator: { $0.isWhitespace })
-            if parts.count >= 2 {
-                return RemoteTmuxContext(host: "mac", sessionName: String(parts[1]), transport: "mosh")
+        for tokens in remoteTmuxCommandTokenCandidates(from: trimmed) {
+            if let context = remoteTmuxContext(fromCommandTokens: tokens) {
+                return context
             }
         }
+        return nil
+    }
 
-        guard let match = trimmed.range(
-            of: #"^mosh\s+([^\s]+)\s+--\s+tmux\b.*\s-s\s+([^\s]+)"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) else {
-            return nil
+    private static func remoteTmuxCommandTokenCandidates(from command: String) -> [[String]] {
+        var candidates: [[String]] = []
+        let initialTokens = shellLikeTokens(command)
+        if !initialTokens.isEmpty {
+            candidates.append(initialTokens)
         }
-        let matched = String(trimmed[match])
-        let parts = matched.split(whereSeparator: { $0.isWhitespace })
-        guard parts.count >= 2, let sessionFlagIndex = parts.lastIndex(of: "-s"),
-              parts.index(after: sessionFlagIndex) < parts.endIndex else {
-            return nil
+
+        var expandedTokens = initialTokens
+        let aliases = zshAliasMap()
+        var expandedAliasNames = Set<String>()
+        for _ in 0..<6 {
+            guard let first = expandedTokens.first,
+                  expandedAliasNames.insert(first).inserted,
+                  let aliasValue = aliases[first] else {
+                break
+            }
+            let aliasTokens = shellLikeTokens(aliasValue)
+            guard !aliasTokens.isEmpty else { break }
+            expandedTokens = aliasTokens + expandedTokens.dropFirst()
+            candidates.append(expandedTokens)
         }
-        return RemoteTmuxContext(
-            host: String(parts[1]),
-            sessionName: String(parts[parts.index(after: sessionFlagIndex)]),
-            transport: "mosh"
-        )
+
+        return candidates
+    }
+
+    private static func remoteTmuxContext(fromCommandTokens tokens: [String]) -> RemoteTmuxContext? {
+        let normalizedTokens = tokens.drop(while: { token in
+            token == "command" || token == "exec" || token == "noglob" || token.contains("=") && !token.hasPrefix("-")
+        })
+        guard !normalizedTokens.isEmpty else { return nil }
+
+        if let context = remoteTmuxContextFromMosh(tokens: Array(normalizedTokens)) {
+            return context
+        }
+        if let context = remoteTmuxContextFromSSH(tokens: Array(normalizedTokens)) {
+            return context
+        }
+        if let context = remoteTmuxContextFromBareSSHHost(tokens: Array(normalizedTokens)) {
+            return context
+        }
+        return nil
+    }
+
+    private static func remoteTmuxContextFromMosh(tokens: [String]) -> RemoteTmuxContext? {
+        guard let commandIndex = tokens.firstIndex(where: { $0 == "mosh" || $0.hasSuffix("/mosh") }) else { return nil }
+        var index = tokens.index(after: commandIndex)
+        while index < tokens.endIndex {
+            let token = tokens[index]
+            if token == "--" {
+                index = tokens.index(after: index)
+                continue
+            }
+            if token.hasPrefix("-") {
+                index = skipRemoteCommandOption(tokens: tokens, index: index, optionsWithSeparateValue: ["--ssh", "--server", "--client", "--port", "-p"])
+                continue
+            }
+            let host = token
+            let commandTokens = expandedRemoteCommandTokens(Array(tokens[tokens.index(after: index)...]))
+            guard let sessionName = tmuxSessionName(fromCommandTokens: commandTokens) else { return nil }
+            return RemoteTmuxContext(host: host, sessionName: sessionName, transport: "mosh")
+        }
+        return nil
+    }
+
+    private static func remoteTmuxContextFromSSH(tokens: [String]) -> RemoteTmuxContext? {
+        guard let commandIndex = tokens.firstIndex(where: { $0 == "ssh" || $0.hasSuffix("/ssh") }) else { return nil }
+        var index = tokens.index(after: commandIndex)
+        while index < tokens.endIndex {
+            let token = tokens[index]
+            if token == "--" {
+                index = tokens.index(after: index)
+                break
+            }
+            if token.hasPrefix("-") {
+                index = skipRemoteCommandOption(
+                    tokens: tokens,
+                    index: index,
+                    optionsWithSeparateValue: ["-b", "-c", "-D", "-E", "-F", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w"]
+                )
+                continue
+            }
+            let host = token
+            let commandTokens = expandedRemoteCommandTokens(Array(tokens[tokens.index(after: index)...]))
+            guard let sessionName = tmuxSessionName(fromCommandTokens: commandTokens) else { return nil }
+            return RemoteTmuxContext(host: host, sessionName: sessionName, transport: "ssh")
+        }
+        return nil
+    }
+
+    private static func remoteTmuxContextFromBareSSHHost(tokens: [String]) -> RemoteTmuxContext? {
+        guard let host = tokens.first else { return nil }
+        let knownHosts = sshConfigHostAliases()
+        guard knownHosts.contains(host) || host.contains("@") else { return nil }
+        let commandTokens = expandedRemoteCommandTokens(Array(tokens.dropFirst()))
+        guard let sessionName = tmuxSessionName(fromCommandTokens: commandTokens) else { return nil }
+        return RemoteTmuxContext(host: host, sessionName: sessionName, transport: "ssh")
+    }
+
+    private static func skipRemoteCommandOption(tokens: [String], index: Int, optionsWithSeparateValue: Set<String>) -> Int {
+        let token = tokens[index]
+        let nextIndex = tokens.index(after: index)
+        if optionsWithSeparateValue.contains(token), nextIndex < tokens.endIndex {
+            return tokens.index(after: nextIndex)
+        }
+        return nextIndex
+    }
+
+    private static func expandedRemoteCommandTokens(_ tokens: [String]) -> [String] {
+        if tokens.count == 1, let only = tokens.first, only.contains(" ") {
+            return shellLikeTokens(only)
+        }
+        return tokens
+    }
+
+    private static func tmuxSessionName(fromCommandTokens tokens: [String]) -> String? {
+        guard let tmuxIndex = tokens.firstIndex(where: { $0 == "tmux" || $0.hasSuffix("/tmux") }) else { return nil }
+        let tmuxTokens = Array(tokens[tokens.index(after: tmuxIndex)...])
+        var index = 0
+        while index < tmuxTokens.count {
+            let token = tmuxTokens[index]
+            if ["-s", "-t"].contains(token), index + 1 < tmuxTokens.count {
+                return normalizedTmuxSessionTarget(tmuxTokens[index + 1])
+            }
+            if token.hasPrefix("-") && token.contains("s") && index + 1 < tmuxTokens.count {
+                return normalizedTmuxSessionTarget(tmuxTokens[index + 1])
+            }
+            if token.hasPrefix("-") && token.contains("t") && index + 1 < tmuxTokens.count {
+                return normalizedTmuxSessionTarget(tmuxTokens[index + 1])
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    private static func normalizedTmuxSessionTarget(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let withoutPane = trimmed.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? trimmed
+        let withoutWindow = withoutPane.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? withoutPane
+        let normalized = withoutWindow.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private static func shellLikeTokens(_ command: String) -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        var quote: Character?
+        var isEscaping = false
+        for character in command {
+            if isEscaping {
+                current.append(character)
+                isEscaping = false
+                continue
+            }
+            if character == "\\" {
+                isEscaping = true
+                continue
+            }
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                } else {
+                    current.append(character)
+                }
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character
+                continue
+            }
+            if character.isWhitespace {
+                if !current.isEmpty {
+                    tokens.append(current)
+                    current = ""
+                }
+                continue
+            }
+            current.append(character)
+        }
+        if !current.isEmpty {
+            tokens.append(current)
+        }
+        return tokens
+    }
+
+    private static func zshAliasMap() -> [String: String] {
+        var aliases: [String: String] = [:]
+        var visited = Set<String>()
+        var files = zshStartupFilesForAliasParsing()
+        while !files.isEmpty {
+            let path = files.removeFirst()
+            guard visited.insert(path).inserted,
+                  let text = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            for rawLine in text.components(separatedBy: .newlines) {
+                let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let sourcedPath = sourcedZshPath(fromLine: line) {
+                    files.append(sourcedPath)
+                    continue
+                }
+                guard line.hasPrefix("alias ") else { continue }
+                parseZshAliasLine(line).forEach { aliases[$0.key] = $0.value }
+            }
+        }
+        return aliases
+    }
+
+    private static func zshStartupFilesForAliasParsing() -> [String] {
+        let home = NSHomeDirectory()
+        return [".zshenv", ".zprofile", ".zshrc", ".zlogin"]
+            .map { URL(fileURLWithPath: home).appendingPathComponent($0).path }
+    }
+
+    private static func sourcedZshPath(fromLine line: String) -> String? {
+        guard line.hasPrefix("source ") || line.hasPrefix(". ") else { return nil }
+        let tokens = shellLikeTokens(line)
+        guard tokens.count >= 2 else { return nil }
+        return expandHomePath(tokens[1])
+    }
+
+    private static func parseZshAliasLine(_ line: String) -> [String: String] {
+        var result: [String: String] = [:]
+        let body = String(line.dropFirst("alias ".count))
+        let tokens = shellLikeTokens(body)
+        for token in tokens {
+            guard let equalsIndex = token.firstIndex(of: "=") else { continue }
+            let name = String(token[..<equalsIndex])
+            let value = String(token[token.index(after: equalsIndex)...])
+            guard !name.isEmpty, !value.isEmpty else { continue }
+            result[name] = value
+        }
+        return result
+    }
+
+    private static func sshConfigHostAliases() -> Set<String> {
+        let path = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".ssh/config").path
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+        var aliases = Set<String>()
+        for rawLine in text.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard line.lowercased().hasPrefix("host ") else { continue }
+            for alias in line.dropFirst(5).split(whereSeparator: { $0.isWhitespace }) {
+                let value = String(alias)
+                if !value.contains("*") && !value.contains("?") {
+                    aliases.insert(value)
+                }
+            }
+        }
+        return aliases
+    }
+
+    private static func expandHomePath(_ path: String) -> String {
+        if path == "~" { return NSHomeDirectory() }
+        if path.hasPrefix("~/") {
+            return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(String(path.dropFirst(2))).path
+        }
+        return path
     }
 
     private static func titleWithoutLeadingStatusPrefixes(_ title: String) -> String {
