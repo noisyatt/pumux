@@ -5,10 +5,14 @@ extension RestorableAgentSessionIndex {
         registry: CmuxVaultAgentRegistry,
         fileManager: FileManager
     ) -> [PanelKey: (snapshot: SessionRestorableAgentSnapshot, updatedAt: TimeInterval)] {
-        guard !registry.registrations.isEmpty else { return [:] }
         let capturedAt = Date().timeIntervalSince1970
         let processSnapshot = CmuxTopProcessSnapshot.capture(includeProcessDetails: false)
-        var resolved: [PanelKey: (snapshot: SessionRestorableAgentSnapshot, updatedAt: TimeInterval)] = [:]
+        var resolved = piRegistryDetectedSnapshots(
+            processSnapshot: processSnapshot,
+            fileManager: fileManager,
+            capturedAt: capturedAt
+        )
+        guard !registry.registrations.isEmpty else { return resolved }
         var registriesByWorkingDirectory: [String: CmuxVaultAgentRegistry] = [:]
 
         func registryForWorkingDirectory(_ workingDirectory: String?) -> CmuxVaultAgentRegistry {
@@ -65,10 +69,205 @@ extension RestorableAgentSessionIndex {
                 ),
                 registration: registration
             )
-            resolved[PanelKey(workspaceId: workspaceId, panelId: panelId)] = (snapshot: snapshot, updatedAt: capturedAt)
+            let key = PanelKey(workspaceId: workspaceId, panelId: panelId)
+            if let existing = resolved[key], existing.updatedAt > capturedAt {
+                continue
+            }
+            resolved[key] = (snapshot: snapshot, updatedAt: capturedAt)
         }
 
         return resolved
+    }
+
+    private static func piRegistryDetectedSnapshots(
+        processSnapshot: CmuxTopProcessSnapshot,
+        fileManager: FileManager,
+        capturedAt: TimeInterval,
+        homeDirectory: String = NSHomeDirectory()
+    ) -> [PanelKey: (snapshot: SessionRestorableAgentSnapshot, updatedAt: TimeInterval)] {
+        let registryPath = (homeDirectory as NSString)
+            .appendingPathComponent(".pi/agent/session-registry.json")
+        guard fileManager.fileExists(atPath: registryPath),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: registryPath)),
+              let registry = try? JSONDecoder().decode(PiSessionContextRegistryFile.self, from: data) else {
+            return [:]
+        }
+
+        let scopedProcessesByPID = Dictionary(
+            uniqueKeysWithValues: processSnapshot.cmuxScopedProcesses().map { ($0.pid, $0) }
+        )
+        var resolved: [PanelKey: (snapshot: SessionRestorableAgentSnapshot, updatedAt: TimeInterval)] = [:]
+        for record in registry.sessions {
+            guard record.isActive,
+                  let pid = record.process?.pid,
+                  let process = scopedProcessesByPID[pid],
+                  let workspaceId = process.cmuxWorkspaceID,
+                  let panelId = process.cmuxSurfaceID,
+                  let sessionId = normalized(record.sessionId) else {
+                continue
+            }
+
+            let workingDirectory = normalized(record.restore?.cwd) ?? normalized(record.cwd)
+            let launch = piLaunchCommandSnapshot(from: record, workingDirectory: workingDirectory, capturedAt: capturedAt)
+            let snapshot = SessionRestorableAgentSnapshot(
+                kind: .pi,
+                sessionId: sessionId,
+                workingDirectory: workingDirectory,
+                launchCommand: launch,
+                registration: nil
+            )
+            let updatedAt = iso8601TimeInterval(record.lastActiveAt) ?? capturedAt
+            resolved[PanelKey(workspaceId: workspaceId, panelId: panelId)] = (snapshot: snapshot, updatedAt: updatedAt)
+        }
+        return resolved
+    }
+
+    private static func piLaunchCommandSnapshot(
+        from record: PiSessionContextRecord,
+        workingDirectory: String?,
+        capturedAt: TimeInterval
+    ) -> AgentLaunchCommandSnapshot {
+        let argv = record.process?.argv ?? []
+        let piIndex = argv.firstIndex { argument in
+            let basename = (argument as NSString).lastPathComponent
+            return basename == "pi" || argument.hasSuffix("/pi")
+        }
+        let executablePath = piIndex.map { argv[$0] } ?? "pi"
+        let arguments: [String]
+        if let piIndex {
+            arguments = [executablePath] + argv.dropFirst(piIndex + 1)
+        } else {
+            arguments = [executablePath]
+        }
+        return AgentLaunchCommandSnapshot(
+            launcher: "pi-session-registry",
+            executablePath: executablePath,
+            arguments: arguments,
+            workingDirectory: workingDirectory,
+            environment: nil,
+            capturedAt: capturedAt,
+            source: "pi-session-registry"
+        )
+    }
+
+    private static func iso8601TimeInterval(_ rawValue: String?) -> TimeInterval? {
+        guard let rawValue = normalized(rawValue) else { return nil }
+        return ISO8601DateFormatter().date(from: rawValue)?.timeIntervalSince1970
+    }
+
+    private static func normalized(_ rawValue: String?) -> String? {
+        guard let rawValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawValue.isEmpty else {
+            return nil
+        }
+        return rawValue
+    }
+}
+
+private struct PiSessionContextRegistryFile: Decodable, Sendable {
+    var sessions: [PiSessionContextRecord] = []
+}
+
+private struct PiSessionContextRecord: Decodable, Sendable {
+    var sessionId: String?
+    var cwd: String?
+    var lastActiveAt: String?
+    var process: PiSessionContextProcess?
+    var tmux: PiSessionContextTmux?
+    var restore: PiSessionContextRestore?
+    var state: PiSessionContextState?
+
+    var isActive: Bool {
+        state?.status?.caseInsensitiveCompare("active") == .orderedSame
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId = "session_id"
+        case cwd
+        case lastActiveAt = "last_active_at"
+        case process
+        case tmux
+        case restore
+        case state
+    }
+}
+
+private struct PiSessionContextProcess: Decodable, Sendable {
+    var pid: Int?
+    var argv: [String]?
+}
+
+private struct PiSessionContextTmux: Decodable, Sendable {
+    var session: String?
+}
+
+private struct PiSessionContextRestore: Decodable, Sendable {
+    var cwd: String?
+}
+
+private struct PiSessionContextState: Decodable, Sendable {
+    var status: String?
+}
+
+enum PiSessionContextRegistry {
+    static func restorableAgentSnapshot(matchingTmuxSession sessionName: String) -> SessionRestorableAgentSnapshot? {
+        let trimmedSession = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSession.isEmpty,
+              let record = activeRecords().first(where: { record in
+                  record.tmux?.session?.caseInsensitiveCompare(trimmedSession) == .orderedSame
+              }),
+              let sessionId = normalized(record.sessionId) else {
+            return nil
+        }
+        let workingDirectory = normalized(record.restore?.cwd) ?? normalized(record.cwd)
+        return SessionRestorableAgentSnapshot(
+            kind: .pi,
+            sessionId: sessionId,
+            workingDirectory: workingDirectory,
+            launchCommand: launchCommandSnapshot(from: record, workingDirectory: workingDirectory),
+            registration: nil
+        )
+    }
+
+    private static func activeRecords(
+        homeDirectory: String = NSHomeDirectory(),
+        fileManager: FileManager = .default
+    ) -> [PiSessionContextRecord] {
+        let registryPath = (homeDirectory as NSString)
+            .appendingPathComponent(".pi/agent/session-registry.json")
+        guard fileManager.fileExists(atPath: registryPath),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: registryPath)),
+              let registry = try? JSONDecoder().decode(PiSessionContextRegistryFile.self, from: data) else {
+            return []
+        }
+        return registry.sessions.filter(\.isActive)
+    }
+
+    private static func launchCommandSnapshot(
+        from record: PiSessionContextRecord,
+        workingDirectory: String?
+    ) -> AgentLaunchCommandSnapshot {
+        let argv = record.process?.argv ?? []
+        let piIndex = argv.firstIndex { argument in
+            let basename = (argument as NSString).lastPathComponent
+            return basename == "pi" || argument.hasSuffix("/pi")
+        }
+        let executablePath = piIndex.map { argv[$0] } ?? "pi"
+        let arguments: [String]
+        if let piIndex {
+            arguments = [executablePath] + Array(argv.dropFirst(piIndex + 1))
+        } else {
+            arguments = [executablePath]
+        }
+        return AgentLaunchCommandSnapshot(
+            launcher: "pi-session-registry",
+            executablePath: executablePath,
+            arguments: arguments,
+            workingDirectory: workingDirectory,
+            environment: nil,
+            capturedAt: Date().timeIntervalSince1970,
+            source: "pi-session-registry"
+        )
     }
 
     private static func normalized(_ rawValue: String?) -> String? {

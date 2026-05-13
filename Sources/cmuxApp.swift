@@ -542,18 +542,18 @@ struct cmuxApp: App {
                     workspaceCommandMenuContent(manager: activeTabManager)
                 }
 
-                Menu("tmux") {
-                    Button("New / Attach tmux Tab…") {
+                Menu(String(localized: "menu.tmux", defaultValue: "TMUX")) {
+                    Button(String(localized: "menu.tmux.newAttach", defaultValue: "New / Attach tmux Tab…")) {
                         AppDelegate.shared?.promptNewTmuxTab(preferredWindow: NSApp.keyWindow ?? NSApp.mainWindow)
                     }
 
-                    Button("Rename Current tmux Session…") {
+                    Button(String(localized: "menu.tmux.renameCurrent", defaultValue: "Rename Current tmux Session…")) {
                         AppDelegate.shared?.promptRenameCurrentTmuxSession(preferredWindow: NSApp.keyWindow ?? NSApp.mainWindow)
                     }
 
                     let sessions = AppDelegate.shared?.currentTmuxSessionNamesForMenu() ?? []
                     if sessions.isEmpty {
-                        Button("No tmux Sessions") {}
+                        Button(String(localized: "menu.tmux.empty", defaultValue: "No tmux Sessions")) {}
                             .disabled(true)
                     } else {
                         Divider()
@@ -565,6 +565,43 @@ struct cmuxApp: App {
                                 )
                             }
                         }
+                    }
+                }
+
+                Menu(String(localized: "menu.moshTmux", defaultValue: "MOSH TMUX")) {
+                    let loadState = AppDelegate.shared?.currentMoshTmuxMenuLoadState() ?? .idle
+                    Button(String(localized: "menu.moshTmux.refresh", defaultValue: "Refresh MOSH TMUX Sessions")) {
+                        AppDelegate.shared?.refreshMoshTmuxSessionsForMenu()
+                    }
+                    .disabled(loadState.isLoading)
+
+                    if loadState.isLoading {
+                        Button(String(localized: "menu.moshTmux.loading", defaultValue: "Loading MOSH TMUX sessions…")) {}
+                            .disabled(true)
+                    }
+
+                    let moshSessions = AppDelegate.shared?.currentMoshTmuxSessionsForMenu() ?? []
+                    if moshSessions.isEmpty && !loadState.isLoading {
+                        Button(String(localized: "menu.moshTmux.empty", defaultValue: "No MOSH TMUX Sessions")) {}
+                            .disabled(true)
+                    } else if !moshSessions.isEmpty {
+                        Divider()
+                        ForEach(moshSessions) { session in
+                            Button(session.displayTitle) {
+                                _ = AppDelegate.shared?.newMoshTmuxTab(
+                                    host: session.host,
+                                    sessionName: session.sessionName,
+                                    preferredWindow: NSApp.keyWindow ?? NSApp.mainWindow
+                                )
+                            }
+                            .disabled(loadState.isLoading)
+                        }
+                    }
+
+                    if case .failed(let message) = loadState {
+                        Divider()
+                        Button(message) {}
+                            .disabled(true)
                     }
                 }
 

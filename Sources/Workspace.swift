@@ -493,15 +493,24 @@ extension Workspace {
             let inferredRemoteTmuxStartCommand = Self.restorableRemoteTmuxStartCommand(
                 fromDisplayedCommandTitle: panelTitle ?? terminalPanel.displayTitle
             )
-            let restorableTmuxStartCommand = effectiveRestorableAgent == nil
-                ? Self.restorableTmuxStartCommand(explicitTmuxStartCommand ?? inferredRemoteTmuxStartCommand)
-                : nil
+            let restorableTmuxStartCommand = Self.restorableTmuxStartCommand(
+                explicitTmuxStartCommand ?? inferredRemoteTmuxStartCommand
+            )
+            let piRegistryAgent = restorableTmuxStartCommand
+                .flatMap(Self.managedTmuxSessionName(from:))
+                .flatMap { sessionName in
+                    PiSessionContextRegistry.restorableAgentSnapshot(matchingTmuxSession: sessionName)
+                }
+            let terminalRestorableAgent = effectiveRestorableAgent ?? piRegistryAgent
+            let persistedTmuxStartCommand = terminalRestorableAgent?.kind == .pi
+                ? restorableTmuxStartCommand
+                : (terminalRestorableAgent == nil ? restorableTmuxStartCommand : nil)
             let shouldPersistScrollback = Self.shouldPersistSessionScrollback(
                 shellActivityState: panelShellActivityStates[panelId],
                 fallbackNeedsConfirmClose: terminalPanel.needsConfirmClose()
             ) && Self.shouldReplaySessionScrollback(
-                restorableAgent: effectiveRestorableAgent,
-                tmuxStartCommand: restorableTmuxStartCommand
+                restorableAgent: terminalRestorableAgent,
+                tmuxStartCommand: persistedTmuxStartCommand
             )
 #if DEBUG
             let allowDebugFallbackScrollback = debugSessionSnapshotScrollbackFallbackPanelIds.contains(panelId)
@@ -524,8 +533,8 @@ extension Workspace {
             terminalSnapshot = SessionTerminalPanelSnapshot(
                 workingDirectory: directory,
                 scrollback: resolvedScrollback,
-                agent: effectiveRestorableAgent,
-                tmuxStartCommand: restorableTmuxStartCommand
+                agent: terminalRestorableAgent,
+                tmuxStartCommand: persistedTmuxStartCommand
             )
             browserSnapshot = nil
             markdownSnapshot = nil
@@ -618,6 +627,15 @@ extension Workspace {
         return "\(tmuxShellSingleQuoted(executable)) new-session -A -s \(tmuxShellSingleQuoted(trimmedName))"
     }
 
+    nonisolated static func managedMoshTmuxStartCommand(host: String, sessionName: String) -> String? {
+        let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedName = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedHost.isEmpty, !trimmedName.isEmpty else { return nil }
+        return remoteTmuxStartCommand(
+            context: RemoteTmuxContext(host: trimmedHost, sessionName: trimmedName, transport: "mosh")
+        )
+    }
+
     private static func restorableRemoteTmuxStartCommand(fromDisplayedCommandTitle title: String?) -> String? {
         guard let title,
               let context = remoteTmuxContext(fromDisplayedCommandTitle: title) else {
@@ -626,7 +644,7 @@ extension Workspace {
         return remoteTmuxStartCommand(context: context)
     }
 
-    private static func remoteTmuxStartCommand(context: RemoteTmuxContext) -> String? {
+    private nonisolated static func remoteTmuxStartCommand(context: RemoteTmuxContext) -> String? {
         let host = context.host.trimmingCharacters(in: .whitespacesAndNewlines)
         let sessionName = context.sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty, !sessionName.isEmpty else { return nil }
@@ -902,7 +920,8 @@ extension Workspace {
             let snapshotRemoteTmuxStartCommand = Self.restorableRemoteTmuxStartCommand(
                 fromDisplayedCommandTitle: snapshot.title ?? snapshot.customTitle
             )
-            let restorableTmuxStartCommand = restorableAgent == nil
+            let shouldRestoreTmuxCommand = restorableAgent == nil || restorableAgent?.kind == .pi
+            let restorableTmuxStartCommand = shouldRestoreTmuxCommand
                 ? Self.restorableTmuxStartCommand(snapshot.terminal?.tmuxStartCommand ?? snapshotRemoteTmuxStartCommand)
                 : nil
             let restoredTmuxStartupScript = restorableTmuxStartCommand.flatMap {
@@ -12269,6 +12288,37 @@ final class Workspace: Identifiable, ObservableObject {
         )
         if let panel {
             setPanelCustomTitle(panelId: panel.id, title: "tmux: \(trimmedName)")
+        }
+        return panel
+    }
+
+    @discardableResult
+    func newManagedMoshTmuxSurfaceInFocusedPane(host: String, sessionName: String, focus: Bool? = true) -> TerminalPanel? {
+        guard let focusedPaneId = bonsplitController.focusedPaneId else { return nil }
+        let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedName = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedHost.isEmpty,
+              !trimmedName.isEmpty,
+              let tmuxStartCommand = Self.managedMoshTmuxStartCommand(host: trimmedHost, sessionName: trimmedName) else {
+            return nil
+        }
+        let workingDirectory = currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        let startupScript = SessionRestoredTerminalCommandStore.writeLauncherScript(
+            command: tmuxStartCommand,
+            workingDirectory: workingDirectory.isEmpty ? nil : workingDirectory
+        )
+        guard let startupScript else { return nil }
+        let panel = newTerminalSurface(
+            inPane: focusedPaneId,
+            focus: focus,
+            workingDirectory: workingDirectory.isEmpty ? nil : workingDirectory,
+            initialCommand: startupScript.path,
+            tmuxStartCommand: tmuxStartCommand
+        )
+        if let panel {
+            let format = String(localized: "terminal.title.moshTmux", defaultValue: "MOSH TMUX: %@ / %@")
+            setPanelCustomTitle(panelId: panel.id, title: String(format: format, trimmedHost, trimmedName))
+            updatePanelRemoteTmuxContext(panelId: panel.id, host: trimmedHost, sessionName: trimmedName, transport: "mosh")
         }
         return panel
     }

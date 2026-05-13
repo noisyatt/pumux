@@ -5429,6 +5429,12 @@ class TabManager: ObservableObject {
         return selectedWorkspace?.newManagedTmuxSurfaceInFocusedPane(sessionName: sessionName, focus: true) != nil
     }
 
+    @discardableResult
+    func newManagedMoshTmuxSurface(host: String, sessionName: String) -> Bool {
+        selectedWorkspace?.clearSplitZoom()
+        return selectedWorkspace?.newManagedMoshTmuxSurfaceInFocusedPane(host: host, sessionName: sessionName, focus: true) != nil
+    }
+
     func focusedManagedTmuxSessionName() -> String? {
         selectedWorkspace?.focusedManagedTmuxSessionName()
     }

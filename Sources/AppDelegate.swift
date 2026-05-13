@@ -529,9 +529,47 @@ final class CmuxMainThreadTurnProfiler {
 }
 #endif
 
+struct MoshTmuxMenuSession: Identifiable, Hashable, Sendable {
+    let host: String
+    let sessionName: String
+
+    var id: String { "\(host)\u{0}\(sessionName)" }
+    var displayTitle: String { "\(host) / \(sessionName)" }
+}
+
+enum MoshTmuxMenuLoadState: Equatable, Sendable {
+    case idle
+    case loading
+    case loaded
+    case failed(String)
+
+    var isLoading: Bool {
+        if case .loading = self { return true }
+        return false
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUserNotificationCenterDelegate, NSMenuItemValidation {
     nonisolated(unsafe) static var shared: AppDelegate?
+
+    private enum MoshTmuxMenuFetchResult: Sendable {
+        case success([MoshTmuxMenuSession])
+        case failure(String)
+    }
+
+    private struct ShellCommandResult: Sendable {
+        let status: Int32
+        let output: String
+        let error: String
+        let timedOut: Bool
+
+        var succeeded: Bool { !timedOut && status == 0 }
+    }
+
+    private var moshTmuxMenuSessions: [MoshTmuxMenuSession] = []
+    private var moshTmuxMenuLoadState: MoshTmuxMenuLoadState = .idle
+    private var moshTmuxMenuLoadGeneration: UInt64 = 0
 
     private static let cachedIsRunningUnderXCTest = detectRunningUnderXCTest(ProcessInfo.processInfo.environment)
 
@@ -1155,6 +1193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
             installMenuBarVisibilityObserver()
             syncApplicationPresentationPreferences()
             updateController.startUpdaterIfNeeded()
+            refreshMoshTmuxSessionsForMenu()
         }
         titlebarAccessoryController.start()
         windowDecorationsController.start()
@@ -2739,6 +2778,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
         Self.tmuxSessionNames()
     }
 
+    func currentMoshTmuxSessionsForMenu() -> [MoshTmuxMenuSession] {
+        moshTmuxMenuSessions
+    }
+
+    func currentMoshTmuxMenuLoadState() -> MoshTmuxMenuLoadState {
+        moshTmuxMenuLoadState
+    }
+
+    func refreshMoshTmuxSessionsForMenu() {
+        guard !moshTmuxMenuLoadState.isLoading else { return }
+        moshTmuxMenuLoadGeneration &+= 1
+        let generation = moshTmuxMenuLoadGeneration
+        moshTmuxMenuLoadState = .loading
+        NSApp.mainMenu?.update()
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = Self.fetchMoshTmuxSessionsForMenu()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.moshTmuxMenuLoadGeneration == generation else { return }
+                switch result {
+                case .success(let sessions):
+                    self.moshTmuxMenuSessions = sessions
+                    self.moshTmuxMenuLoadState = .loaded
+                case .failure(let message):
+                    self.moshTmuxMenuSessions = []
+                    self.moshTmuxMenuLoadState = .failed(message)
+                }
+                NSApp.mainMenu?.update()
+            }
+        }
+    }
+
     @discardableResult
     func newTmuxTab(sessionName: String, preferredWindow: NSWindow? = nil) -> Bool {
         let trimmedName = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2747,6 +2818,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
             return false
         }
         return manager.newManagedTmuxSurface(sessionName: trimmedName)
+    }
+
+    @discardableResult
+    func newMoshTmuxTab(host: String, sessionName: String, preferredWindow: NSWindow? = nil) -> Bool {
+        let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedName = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedHost.isEmpty,
+              !trimmedName.isEmpty,
+              let manager = activeTabManagerForCommands(preferredWindow: preferredWindow) else {
+            return false
+        }
+        return manager.newManagedMoshTmuxSurface(host: trimmedHost, sessionName: trimmedName)
     }
 
     func currentManagedTmuxSessionName(preferredWindow: NSWindow? = nil) -> String? {
@@ -2911,7 +2994,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
         }
     }
 
-    private static func tmuxSessionNames() -> [String] {
+    private nonisolated static func tmuxSessionNames() -> [String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-lc", "tmux list-sessions -F '#S' 2>/dev/null"]
@@ -2927,10 +3010,232 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
         guard process.terminationStatus == 0 else { return [] }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         let text = String(data: data, encoding: .utf8) ?? ""
-        return text
-            .split(separator: "\n")
+        return parsedTmuxSessionNames(from: text)
+    }
+
+    private nonisolated static func fetchMoshTmuxSessionsForMenu() -> MoshTmuxMenuFetchResult {
+        let hosts = candidateMoshTmuxHostsForMenu()
+        guard !hosts.isEmpty else {
+            return .failure(String(localized: "menu.moshTmux.noHosts", defaultValue: "No MOSH TMUX hosts found"))
+        }
+
+        var sessions: [MoshTmuxMenuSession] = []
+        var failedHosts: [String] = []
+        for host in hosts {
+            var names: [String] = []
+            for attempt in 1...5 {
+                let remoteCommand = "tmux ls 2>/dev/null"
+                let command = "ssh -o BatchMode=yes -o ConnectTimeout=3 \(shellSingleQuoted(host)) \(shellSingleQuoted(remoteCommand))"
+                let result = runZshCommand(command, login: true, interactive: false, timeout: 8)
+                if result.succeeded {
+                    names = parsedTmuxSessionNames(from: result.output)
+                    break
+                }
+                if attempt < 5 {
+                    Thread.sleep(forTimeInterval: min(1.0, 0.2 * Double(attempt)))
+                }
+            }
+            if names.isEmpty {
+                failedHosts.append(host)
+            } else {
+                sessions.append(contentsOf: names.map { MoshTmuxMenuSession(host: host, sessionName: $0) })
+            }
+        }
+
+        let sortedSessions = sessions.sorted {
+            if $0.host.localizedCaseInsensitiveCompare($1.host) == .orderedSame {
+                return $0.sessionName.localizedCaseInsensitiveCompare($1.sessionName) == .orderedAscending
+            }
+            return $0.host.localizedCaseInsensitiveCompare($1.host) == .orderedAscending
+        }
+        if !sortedSessions.isEmpty {
+            return .success(sortedSessions)
+        }
+        if failedHosts.isEmpty {
+            return .success([])
+        }
+        return .failure(String(
+            format: String(localized: "menu.moshTmux.loadFailed", defaultValue: "Could not load MOSH TMUX sessions for %@"),
+            failedHosts.joined(separator: ", ")
+        ))
+    }
+
+    private nonisolated static func candidateMoshTmuxHostsForMenu() -> [String] {
+        var hosts: [String] = []
+        appendUniqueHosts(environmentMoshTmuxHosts(), to: &hosts)
+
+        let probe = """
+        for name in mt mtl; do
+          whence -f "$name" 2>/dev/null || true
+          functions "$name" 2>/dev/null || true
+          alias "$name" 2>/dev/null || true
+        done
+        """
+        let definitions = runZshCommand(probe, login: false, interactive: true, timeout: 5)
+        appendUniqueHosts(remoteTmuxHosts(in: definitions.output + "\n" + definitions.error), to: &hosts)
+        return hosts
+    }
+
+    private nonisolated static func environmentMoshTmuxHosts() -> [String] {
+        guard let value = ProcessInfo.processInfo.environment["PUMUX_MOSH_TMUX_HOSTS"] else { return [] }
+        return value
+            .split { $0 == "," || $0 == ";" || $0.isWhitespace }
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    private nonisolated static func appendUniqueHosts(_ candidates: [String], to hosts: inout [String]) {
+        for candidate in candidates {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  !hosts.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) else { continue }
+            hosts.append(trimmed)
+        }
+    }
+
+    private nonisolated static func remoteTmuxHosts(in text: String) -> [String] {
+        var hosts: [String] = []
+        for line in text.components(separatedBy: .newlines) where line.localizedCaseInsensitiveContains("tmux") {
+            appendUniqueHosts(remoteHosts(inTokens: shellLikeTokens(line)), to: &hosts)
+        }
+        appendUniqueHosts(remoteHosts(inTokens: shellLikeTokens(text)), to: &hosts)
+        return hosts
+    }
+
+    private nonisolated static func remoteHosts(inTokens tokens: [String]) -> [String] {
+        var hosts: [String] = []
+        var index = 0
+        while index < tokens.count {
+            let token = tokens[index]
+            if token == "mosh" || token.hasSuffix("/mosh") {
+                if let host = remoteHost(afterCommandAt: index, in: tokens, optionsWithSeparateValue: ["--ssh", "--server", "--client", "--port", "-p"]) {
+                    hosts.append(host)
+                }
+            } else if token == "ssh" || token.hasSuffix("/ssh") {
+                if let host = remoteHost(afterCommandAt: index, in: tokens, optionsWithSeparateValue: ["-b", "-c", "-D", "-E", "-F", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w"]) {
+                    hosts.append(host)
+                }
+            }
+            index += 1
+        }
+        return hosts
+    }
+
+    private nonisolated static func remoteHost(afterCommandAt commandIndex: Int, in tokens: [String], optionsWithSeparateValue: Set<String>) -> String? {
+        var index = commandIndex + 1
+        while index < tokens.count {
+            let token = tokens[index]
+            if token == "--" {
+                index += 1
+                continue
+            }
+            if token.hasPrefix("-") {
+                index += optionsWithSeparateValue.contains(token) ? 2 : 1
+                continue
+            }
+            let host = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            return host.isEmpty ? nil : host
+        }
+        return nil
+    }
+
+    private nonisolated static func parsedTmuxSessionNames(from text: String) -> [String] {
+        text
+            .split(separator: "\n")
+            .compactMap { normalizedTmuxSessionName(fromListLine: String($0)) }
+    }
+
+    private nonisolated static func normalizedTmuxSessionName(fromListLine line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("(") else { return nil }
+        let candidate = trimmed.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map(String.init) ?? trimmed
+        let normalized = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private nonisolated static func runZshCommand(_ command: String, login: Bool, interactive: Bool, timeout: TimeInterval) -> ShellCommandResult {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        var mode = "-"
+        if login { mode += "l" }
+        if interactive { mode += "i" }
+        mode += "c"
+        process.arguments = [mode, command]
+        let output = Pipe()
+        let error = Pipe()
+        process.standardOutput = output
+        process.standardError = error
+
+        do {
+            try process.run()
+        } catch {
+            return ShellCommandResult(status: -1, output: "", error: error.localizedDescription, timedOut: false)
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in semaphore.signal() }
+        let timedOut = semaphore.wait(timeout: .now() + timeout) == .timedOut
+        if timedOut {
+            process.terminate()
+            _ = semaphore.wait(timeout: .now() + 1)
+        }
+
+        let outputText = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let errorText = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return ShellCommandResult(
+            status: timedOut ? -1 : process.terminationStatus,
+            output: outputText,
+            error: errorText,
+            timedOut: timedOut
+        )
+    }
+
+    private nonisolated static func shellLikeTokens(_ command: String) -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        var quote: Character?
+        var isEscaping = false
+        for character in command {
+            if isEscaping {
+                current.append(character)
+                isEscaping = false
+                continue
+            }
+            if character == "\\" {
+                isEscaping = true
+                continue
+            }
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                } else {
+                    current.append(character)
+                }
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character
+                continue
+            }
+            if character.isWhitespace || character == ";" || character == "{" || character == "}" {
+                if !current.isEmpty {
+                    tokens.append(current)
+                    current = ""
+                }
+                continue
+            }
+            current.append(character)
+        }
+        if !current.isEmpty {
+            tokens.append(current)
+        }
+        return tokens
+    }
+
+    private nonisolated static func shellSingleQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
 
     func promptSaveSessionProfile() {
