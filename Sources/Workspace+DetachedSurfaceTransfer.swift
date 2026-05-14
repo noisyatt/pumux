@@ -26,7 +26,7 @@ extension Workspace {
         let customColor: String?
         let manuallyUnread: Bool
         let restorableAgent: SessionRestorableAgentSnapshot?
-        let restorableAgentAutoResumePending: Bool
+        let restorableAgentResumeState: RestoredAgentResumeState?
         let agentRuntime: DetachedAgentRuntimeState?
         let isRemoteTerminal: Bool
         let remoteRelayPort: Int?
@@ -50,7 +50,7 @@ extension Workspace {
                 customColor: customColor,
                 manuallyUnread: manuallyUnread,
                 restorableAgent: restorableAgent,
-                restorableAgentAutoResumePending: restorableAgentAutoResumePending,
+                restorableAgentResumeState: restorableAgentResumeState,
                 agentRuntime: agentRuntime,
                 isRemoteTerminal: isRemoteTerminal,
                 remoteRelayPort: remoteRelayPort,
