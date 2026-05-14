@@ -8,6 +8,71 @@ import XCTest
 #endif
 
 final class RestorableAgentSessionIndexTests: XCTestCase {
+    func testPiRegistryTokenAccountLabelFallsBackFromProviderAlias() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent("cmux-pi-registry-account-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+
+        try writePiSessionRegistry(
+            root: root,
+            sessions: [
+                piRegistryRecord(
+                    sessionId: "inactive-newer",
+                    tmuxSession: "Pi-Pumux",
+                    providerAlias: "openai-codex",
+                    status: "inactive",
+                    lastActiveAt: "2026-05-14T07:59:34.105Z"
+                ),
+                piRegistryRecord(
+                    sessionId: "active-current",
+                    tmuxSession: "Pi-Pumux",
+                    providerAlias: "openai-codex6",
+                    status: "active",
+                    lastActiveAt: "2026-05-14T08:00:03.461Z"
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            PiSessionContextRegistry.tokenAccountLabel(
+                matchingTmuxSession: "Pi-Pumux",
+                homeDirectory: root.path,
+                fileManager: fm
+            ),
+            "C6"
+        )
+    }
+
+    func testPiRegistryTokenAccountLabelMapsAnthropicAlias() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent("cmux-pi-registry-anthropic-account-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+
+        try writePiSessionRegistry(
+            root: root,
+            sessions: [
+                piRegistryRecord(
+                    sessionId: "active-claude",
+                    tmuxSession: "ClaudePane",
+                    providerAlias: "anthropic2",
+                    status: "active",
+                    lastActiveAt: "2026-05-14T08:00:03.461Z"
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            PiSessionContextRegistry.tokenAccountLabel(
+                matchingTmuxSession: "ClaudePane",
+                homeDirectory: root.path,
+                fileManager: fm
+            ),
+            "A2"
+        )
+    }
+
     func testClaudeHookSnapshotRequiresTranscriptFile() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory
@@ -209,6 +274,47 @@ final class RestorableAgentSessionIndexTests: XCTestCase {
             record["transcriptPath"] = transcriptPath
         }
         return record
+    }
+
+    private func piRegistryRecord(
+        sessionId: String,
+        tmuxSession: String,
+        providerAlias: String,
+        status: String,
+        lastActiveAt: String
+    ) -> [String: Any] {
+        [
+            "schema_version": 1,
+            "session_id": sessionId,
+            "cwd": "/tmp/project",
+            "started_at": "2026-05-14T07:00:00.000Z",
+            "last_active_at": lastActiveAt,
+            "process": ["pid": 1234, "argv": ["pi"]],
+            "tmux": ["present": true, "session": tmuxSession, "pane": "%1"],
+            "model": ["provider": providerAlias, "model_id": "test-model"],
+            "account": ["label": providerAlias, "provider_alias": providerAlias],
+            "restore": ["cwd": "/tmp/project"],
+            "state": ["status": status],
+        ]
+    }
+
+    private func writePiSessionRegistry(root: URL, sessions: [[String: Any]]) throws {
+        let registryDir = root
+            .appendingPathComponent(".pi", isDirectory: true)
+            .appendingPathComponent("agent", isDirectory: true)
+        try FileManager.default.createDirectory(at: registryDir, withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(
+            withJSONObject: [
+                "schema_version": 1,
+                "updated_at": "2026-05-14T08:00:04.000Z",
+                "sessions": sessions,
+            ],
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(
+            to: registryDir.appendingPathComponent("session-registry.json", isDirectory: false),
+            options: .atomic
+        )
     }
 
     private func writeClaudeTranscript(sessionId: String, cwd: URL, projectsDir: URL) throws {

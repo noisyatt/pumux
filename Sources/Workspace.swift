@@ -9087,13 +9087,86 @@ final class Workspace: Identifiable, ObservableObject {
         let script = """
         set -e
         session=\(tmuxShellSingleQuoted(trimmedSession))
-        pane_line="$("\(tmux)" list-panes -t "$session" -F '#{pane_active}|#{pane_id}|#{pane_tty}' 2>/dev/null | awk -F '|' '$1 == "1" { print $2 "|" $3; exit }')"
+        pane_line="$("\(tmux)" list-panes -t "$session" -F '#{pane_active}|#{pane_id}|#{pane_tty}|#{pane_current_path}' 2>/dev/null | awk -F '|' '$1 == "1" { print $2 "|" $3 "|" $4; exit }')"
         pane_id="${pane_line%%|*}"
-        tty="${pane_line#*|}"
+        rest="${pane_line#*|}"
+        tty="${rest%%|*}"
+        pane_path="${rest#*|}"
         account="$([ -n "$pane_id" ] && "\(tmux)" display-message -p -t "$pane_id" '#{@pumux_ai_account}' 2>/dev/null || true)"
         [ -n "$account" ] && printf 'PUMUX_AI_ACCOUNT=%s\n' "$account"
-        [ -n "$tty" ] || exit 0
-        ps eww -t "${tty##/dev/}" 2>/dev/null || true
+        if [ -n "$tty" ]; then
+          ps eww -t "${tty##/dev/}" 2>/dev/null || true
+        fi
+        python3 - "$pane_path" <<'PY' 2>/dev/null || true
+        import json, pathlib, re, sys
+        pane_path = sys.argv[1].strip() if len(sys.argv) > 1 else ""
+
+        def badge(raw):
+            if not isinstance(raw, str):
+                return None
+            value = raw.strip().lower()
+            if not value:
+                return None
+            upper = value.upper()
+            if re.match(r"^[AC][1-9]$", upper):
+                return upper
+            for prefix, label_prefix in (("openai-codex", "C"), ("codex", "C"), ("anthropic", "A"), ("claude", "A")):
+                if value.startswith(prefix):
+                    suffix = value[len(prefix):].strip("-_ .")
+                    if not suffix:
+                        return label_prefix + "1"
+                    if suffix.isdigit() and 1 <= int(suffix) <= 9:
+                        return label_prefix + suffix
+            return None
+
+        def candidates_from_record(record):
+            account = record.get("account") if isinstance(record, dict) else None
+            model = record.get("model") if isinstance(record, dict) else None
+            if isinstance(account, dict):
+                yield account.get("label")
+                yield account.get("provider_alias")
+                yield account.get("providerAlias")
+            if isinstance(model, dict):
+                yield model.get("provider")
+            if isinstance(record, dict):
+                yield record.get("provider_alias")
+                yield record.get("providerAlias")
+                yield record.get("provider")
+
+        def print_first_label(candidates):
+            for candidate in candidates:
+                label = badge(candidate)
+                if label:
+                    print("PUMUX_AI_ACCOUNT=" + label)
+                    return True
+            return False
+
+        if pane_path:
+            project_key = pane_path.lstrip("/").replace("/", "-").replace(":", "-")
+            session_dir = pathlib.Path.home() / ".pi" / "agent" / "sessions" / ("--" + project_key + "--")
+            try:
+                files = sorted(
+                    (path for path in session_dir.rglob("*.jsonl") if path.is_file()),
+                    key=lambda path: path.stat().st_mtime,
+                    reverse=True,
+                )[:20]
+            except Exception:
+                files = []
+            for path in files:
+                try:
+                    lines = path.read_text(errors="ignore").splitlines()
+                except Exception:
+                    continue
+                for line in reversed(lines):
+                    if not any(token in line.lower() for token in ("provider", "account", "codex", "claude", "anthropic")):
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    if print_first_label(candidates_from_record(obj)):
+                        raise SystemExit
+        PY
         """
 
         let process = Process()
@@ -9111,8 +9184,11 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
         let data = output.fileHandleForReading.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return nil }
-        return inferredTokenAccountLabel(fromProcessEnvironmentText: text)
+        if let text = String(data: data, encoding: .utf8), !text.isEmpty,
+           let label = inferredTokenAccountLabel(fromProcessEnvironmentText: text) {
+            return label
+        }
+        return PiSessionContextRegistry.tokenAccountLabel(matchingTmuxSession: trimmedSession)
     }
 
     private nonisolated static func inferRemoteTmuxTokenAccountLabel(context: RemoteTmuxContext) -> String? {
@@ -9121,15 +9197,113 @@ final class Workspace: Identifiable, ObservableObject {
         guard !trimmedHost.isEmpty, !trimmedSession.isEmpty else { return nil }
 
         let remoteScript = """
-        set -e
         session=\(tmuxShellSingleQuoted(trimmedSession))
-        pane_line="$(tmux list-panes -t "$session" -F '#{pane_active}|#{pane_id}|#{pane_tty}' 2>/dev/null | awk -F '|' '$1 == "1" { print $2 "|" $3; exit }')"
+        pane_line="$(tmux list-panes -t "$session" -F '#{pane_active}|#{pane_id}|#{pane_tty}|#{pane_current_path}' 2>/dev/null | awk -F '|' '$1 == "1" { print $2 "|" $3 "|" $4; exit }')"
         pane_id="${pane_line%%|*}"
-        tty="${pane_line#*|}"
+        rest="${pane_line#*|}"
+        tty="${rest%%|*}"
+        pane_path="${rest#*|}"
         account="$([ -n "$pane_id" ] && tmux display-message -p -t "$pane_id" '#{@pumux_ai_account}' 2>/dev/null || true)"
         [ -n "$account" ] && printf 'PUMUX_AI_ACCOUNT=%s\n' "$account"
-        [ -n "$tty" ] || exit 0
-        ps eww -t "${tty##/dev/}" 2>/dev/null || true
+        if [ -n "$tty" ]; then
+          ps eww -t "${tty##/dev/}" 2>/dev/null || true
+        fi
+        python3 - "$session" "$pane_path" <<'PY' 2>/dev/null || true
+        import json, pathlib, re, sys
+        session = sys.argv[1].strip() if len(sys.argv) > 1 else ""
+        pane_path = sys.argv[2].strip() if len(sys.argv) > 2 else ""
+
+        def badge(raw):
+            if not isinstance(raw, str):
+                return None
+            value = raw.strip().lower()
+            if not value:
+                return None
+            upper = value.upper()
+            if re.match(r"^[AC][1-9]$", upper):
+                return upper
+            for prefix, label_prefix in (("openai-codex", "C"), ("codex", "C"), ("anthropic", "A"), ("claude", "A")):
+                if value.startswith(prefix):
+                    suffix = value[len(prefix):].strip("-_ .")
+                    if not suffix:
+                        return label_prefix + "1"
+                    if suffix.isdigit() and 1 <= int(suffix) <= 9:
+                        return label_prefix + suffix
+            return None
+
+        def candidates_from_record(record):
+            account = record.get("account") if isinstance(record, dict) else None
+            model = record.get("model") if isinstance(record, dict) else None
+            if isinstance(account, dict):
+                yield account.get("label")
+                yield account.get("provider_alias")
+                yield account.get("providerAlias")
+            if isinstance(model, dict):
+                yield model.get("provider")
+            if isinstance(record, dict):
+                yield record.get("provider_alias")
+                yield record.get("providerAlias")
+                yield record.get("provider")
+
+        def print_first_label(candidates):
+            for candidate in candidates:
+                label = badge(candidate)
+                if label:
+                    print("PUMUX_AI_ACCOUNT=" + label)
+                    return True
+            return False
+
+        def time_key(record):
+            if not isinstance(record, dict):
+                return ""
+            return record.get("last_active_at") or record.get("started_at") or ""
+
+        home = pathlib.Path.home()
+        registry_path = home / ".pi" / "agent" / "session-registry.json"
+        if session and registry_path.exists():
+            try:
+                registry = json.loads(registry_path.read_text(errors="ignore"))
+                records = [
+                    record for record in registry.get("sessions", [])
+                    if isinstance(record, dict)
+                    and str(((record.get("tmux") or {}).get("session") or "")).lower() == session.lower()
+                    and str(((record.get("state") or {}).get("status") or "")).lower() == "active"
+                ]
+                records.sort(key=time_key, reverse=True)
+                for record in records:
+                    if print_first_label(candidates_from_record(record)):
+                        raise SystemExit
+            except SystemExit:
+                raise
+            except Exception:
+                pass
+
+        if pane_path:
+            project_key = pane_path.lstrip("/").replace("/", "-").replace(":", "-")
+            session_dir = home / ".pi" / "agent" / "sessions" / ("--" + project_key + "--")
+            try:
+                files = sorted(
+                    (path for path in session_dir.rglob("*.jsonl") if path.is_file()),
+                    key=lambda path: path.stat().st_mtime,
+                    reverse=True,
+                )[:20]
+            except Exception:
+                files = []
+            for path in files:
+                try:
+                    lines = path.read_text(errors="ignore").splitlines()
+                except Exception:
+                    continue
+                for line in reversed(lines):
+                    if not any(token in line.lower() for token in ("provider", "account", "codex", "claude", "anthropic")):
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    if print_first_label(candidates_from_record(obj)):
+                        raise SystemExit
+        PY
         """
 
         let process = Process()

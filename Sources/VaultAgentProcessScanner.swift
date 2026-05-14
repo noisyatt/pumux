@@ -171,9 +171,12 @@ private struct PiSessionContextRegistryFile: Decodable, Sendable {
 private struct PiSessionContextRecord: Decodable, Sendable {
     var sessionId: String?
     var cwd: String?
+    var startedAt: String?
     var lastActiveAt: String?
     var process: PiSessionContextProcess?
     var tmux: PiSessionContextTmux?
+    var model: PiSessionContextModel?
+    var account: PiSessionContextAccount?
     var restore: PiSessionContextRestore?
     var state: PiSessionContextState?
 
@@ -184,9 +187,12 @@ private struct PiSessionContextRecord: Decodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
         case cwd
+        case startedAt = "started_at"
         case lastActiveAt = "last_active_at"
         case process
         case tmux
+        case model
+        case account
         case restore
         case state
     }
@@ -201,6 +207,20 @@ private struct PiSessionContextTmux: Decodable, Sendable {
     var session: String?
 }
 
+private struct PiSessionContextModel: Decodable, Sendable {
+    var provider: String?
+}
+
+private struct PiSessionContextAccount: Decodable, Sendable {
+    var label: String?
+    var providerAlias: String?
+
+    enum CodingKeys: String, CodingKey {
+        case label
+        case providerAlias = "provider_alias"
+    }
+}
+
 private struct PiSessionContextRestore: Decodable, Sendable {
     var cwd: String?
 }
@@ -211,11 +231,7 @@ private struct PiSessionContextState: Decodable, Sendable {
 
 enum PiSessionContextRegistry {
     static func restorableAgentSnapshot(matchingTmuxSession sessionName: String) -> SessionRestorableAgentSnapshot? {
-        let trimmedSession = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedSession.isEmpty,
-              let record = activeRecords().first(where: { record in
-                  record.tmux?.session?.caseInsensitiveCompare(trimmedSession) == .orderedSame
-              }),
+        guard let record = bestActiveRecord(matchingTmuxSession: sessionName),
               let sessionId = normalized(record.sessionId) else {
             return nil
         }
@@ -227,6 +243,42 @@ enum PiSessionContextRegistry {
             launchCommand: launchCommandSnapshot(from: record, workingDirectory: workingDirectory),
             registration: nil
         )
+    }
+
+    static func tokenAccountLabel(
+        matchingTmuxSession sessionName: String,
+        homeDirectory: String = NSHomeDirectory(),
+        fileManager: FileManager = .default
+    ) -> String? {
+        guard let record = bestActiveRecord(
+            matchingTmuxSession: sessionName,
+            homeDirectory: homeDirectory,
+            fileManager: fileManager
+        ) else {
+            return nil
+        }
+        for candidate in [record.account?.label, record.account?.providerAlias, record.model?.provider] {
+            if let label = tokenAccountBadgeLabel(from: candidate) {
+                return label
+            }
+        }
+        return nil
+    }
+
+    private static func bestActiveRecord(
+        matchingTmuxSession sessionName: String,
+        homeDirectory: String = NSHomeDirectory(),
+        fileManager: FileManager = .default
+    ) -> PiSessionContextRecord? {
+        let trimmedSession = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSession.isEmpty else { return nil }
+        return activeRecords(homeDirectory: homeDirectory, fileManager: fileManager)
+            .filter { record in
+                record.tmux?.session?.caseInsensitiveCompare(trimmedSession) == .orderedSame
+            }
+            .max { lhs, rhs in
+                recordSortTime(lhs) < recordSortTime(rhs)
+            }
     }
 
     private static func activeRecords(
@@ -268,6 +320,42 @@ enum PiSessionContextRegistry {
             capturedAt: Date().timeIntervalSince1970,
             source: "pi-session-registry"
         )
+    }
+
+    private static func tokenAccountBadgeLabel(from rawValue: String?) -> String? {
+        guard let value = normalized(rawValue)?.lowercased() else { return nil }
+        let upper = value.uppercased()
+        if upper.range(of: #"^[AC][1-9]$"#, options: .regularExpression) != nil {
+            return upper
+        }
+        if let number = trailingAccountNumber(in: value, afterAnyOf: ["openai-codex", "codex"]) {
+            return "C\(number)"
+        }
+        if let number = trailingAccountNumber(in: value, afterAnyOf: ["anthropic", "claude"]) {
+            return "A\(number)"
+        }
+        return nil
+    }
+
+    private static func trailingAccountNumber(in value: String, afterAnyOf prefixes: [String]) -> Int? {
+        for prefix in prefixes where value.hasPrefix(prefix) {
+            let suffix = String(value.dropFirst(prefix.count))
+                .trimmingCharacters(in: CharacterSet(charactersIn: "-_ ."))
+            if suffix.isEmpty { return 1 }
+            if let number = Int(suffix), (1...9).contains(number) {
+                return number
+            }
+        }
+        return nil
+    }
+
+    private static func recordSortTime(_ record: PiSessionContextRecord) -> TimeInterval {
+        iso8601TimeInterval(record.lastActiveAt) ?? iso8601TimeInterval(record.startedAt) ?? 0
+    }
+
+    private static func iso8601TimeInterval(_ rawValue: String?) -> TimeInterval? {
+        guard let rawValue = normalized(rawValue) else { return nil }
+        return ISO8601DateFormatter().date(from: rawValue)?.timeIntervalSince1970
     }
 
     private static func normalized(_ rawValue: String?) -> String? {
