@@ -1,0 +1,7 @@
+[
+  {"path": "docs.works/handoffs/f7fde755-b954-4698-b43c-de79b4296a57/handoff.md", "role": "handoff"},
+  {"path": "docs.works/handoffs/f7fde755-b954-4698-b43c-de79b4296a57/handoff.keys.md", "role": "handoff-sidecar"},
+  {"path": "docs.works/worklogs/20260512-f7fde755-pumux-tmux-mosh-menu-split.keys.md", "role": "session-worklog-sidecar"},
+  {"path": "docs.works/worklogs/20260512-f7fde755-pumux-tmux-mosh-menu-split.md", "role": "session-worklog"},
+  {"path": "docs.works/handoffs/f7fde755-b954-4698-b43c-de79b4296a57/recent-commits.txt", "role": "recent-commits"}
+]

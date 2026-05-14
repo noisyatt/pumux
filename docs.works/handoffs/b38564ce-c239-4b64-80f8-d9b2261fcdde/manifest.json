@@ -1,0 +1,26 @@
+{
+  "handoff_id": "b38564ce-c239-4b64-80f8-d9b2261fcdde",
+  "short_id": "b38564ce",
+  "alias": "pumux-pi-api-restore-upstream-0645",
+  "title": "pumux Pi API restore and upstream v0.64.5 follow-up",
+  "created_at": "2026-05-14T16:57:49+09:00",
+  "created_by_agent": "codex",
+  "status": "open",
+  "project": "pumux",
+  "project_root": "/Users/daniel/projects/pumux",
+  "cwd": "/Users/daniel/projects/pumux",
+  "branch": "main",
+  "active_plan_id": "",
+  "active_plan_uuid8": "",
+  "tier": "T1",
+  "phase_cursor": "dogfood",
+  "review_status": "accepted",
+  "summary": "pumux main now includes MOSH TMUX menu/listing, canonical mosh tmux attach persistence, Pi session registry restore metadata, and upstream cmux v0.64.5 merge. Build/install/push are complete; next session should dogfood actual app/reboot restore of Pi-Pumux and verify MOSH TMUX UI in the final v0.64.5 app.",
+  "files": [
+    {"path": "docs.works/handoffs/b38564ce-c239-4b64-80f8-d9b2261fcdde/handoff.md", "role": "handoff"},
+    {"path": "docs.works/handoffs/b38564ce-c239-4b64-80f8-d9b2261fcdde/handoff.keys.md", "role": "handoff-sidecar"},
+    {"path": "docs.works/worklogs/20260514-b38564ce-pumux-pi-api-restore-upstream-0645.keys.md", "role": "session-worklog-sidecar"},
+    {"path": "docs.works/worklogs/20260514-b38564ce-pumux-pi-api-restore-upstream-0645.md", "role": "session-worklog"},
+    {"path": "docs.works/handoffs/b38564ce-c239-4b64-80f8-d9b2261fcdde/recent-commits.txt", "role": "recent-commits"}
+  ]
+}

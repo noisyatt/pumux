@@ -1,0 +1,26 @@
+{
+  "handoff_id": "f7fde755-b954-4698-b43c-de79b4296a57",
+  "short_id": "f7fde755",
+  "alias": "pumux-tmux-mosh-menu-split-planning",
+  "title": "pumux TMUX/MOSH TMUX 메뉴 분리와 mtl 로딩 retry 설계",
+  "created_at": "2026-05-12T18:53:16+09:00",
+  "created_by_agent": "codex",
+  "status": "open",
+  "project": "pumux",
+  "project_root": "/Users/daniel/projects/pumux",
+  "cwd": "/Users/daniel/projects/pumux",
+  "branch": "main",
+  "active_plan_id": "",
+  "active_plan_uuid8": "",
+  "tier": "T1",
+  "phase_cursor": "planning",
+  "review_status": "open",
+  "summary": "Upstream cmux v0.64.4를 pumux main에 fast-forward 머지하고 (f028121bc), Workspace.swift에 zsh alias 확장 + ssh config Host alias 기반 remote tmux 추론과 mosh canonical command 복원을 추가했다 (98ec7bde3). 실 사용에서 mtl 워크스페이스가 자동 attach되지 않는 것을 확인하고, 다음 세션에서 메뉴를 TMUX/MOSH TMUX 둘로 분리하고 mosh 목록 fetch에 5회 retry + 로딩 중 select disable + 세션 저장에 attach 명령 명시 저장 흐름을 구현하기로 결정했다.",
+  "files": [
+    {"path": "docs.works/handoffs/f7fde755-b954-4698-b43c-de79b4296a57/handoff.md", "role": "handoff"},
+    {"path": "docs.works/handoffs/f7fde755-b954-4698-b43c-de79b4296a57/handoff.keys.md", "role": "handoff-sidecar"},
+    {"path": "docs.works/worklogs/20260512-f7fde755-pumux-tmux-mosh-menu-split.keys.md", "role": "session-worklog-sidecar"},
+    {"path": "docs.works/worklogs/20260512-f7fde755-pumux-tmux-mosh-menu-split.md", "role": "session-worklog"},
+    {"path": "docs.works/handoffs/f7fde755-b954-4698-b43c-de79b4296a57/recent-commits.txt", "role": "recent-commits"}
+  ]
+}

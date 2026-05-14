@@ -1,0 +1,9 @@
+{
+  "created_at": "2026-05-14T16:57:49+09:00",
+  "handoff_id": "b38564ce-c239-4b64-80f8-d9b2261fcdde",
+  "alias": "pumux-pi-api-restore-upstream-0645",
+  "created_by_agent": "codex",
+  "manifest_path": "docs.works/handoffs/b38564ce-c239-4b64-80f8-d9b2261fcdde/manifest.json",
+  "inline_context": "pumux main is pushed at upstream v0.64.5 with MOSH TMUX and Pi registry restore implemented. Next: dogfood installed app/reboot restore for tmux: Pi-Pumux and verify MOSH TMUX UI fetch/attach. Watch for any reproducible CLI socket Broken pipe.",
+  "files": []
+}

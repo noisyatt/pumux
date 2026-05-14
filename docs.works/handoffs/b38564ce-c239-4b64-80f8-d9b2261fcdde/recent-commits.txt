@@ -1,0 +1,15 @@
+branch: main
+
+recent commits:
+f168daa1e Merge upstream cmux v0.64.5 into pumux
+278b31209 Bump version to 0.64.5 (#4107)
+4906da096 Keep manual unread sticky until terminal interaction (#4104)
+b60b4bde8 Add task manager sorting and program aggregates (#4066)
+8a5dcc1d4 Open markdown files in preview panels from cmux open (#4085)
+49397da3e Add Codex Teams subagent panes
+cbdddb908 Fix Korean 2-Set terminal arrows (#4095)
+7820eaffb Fix terminal portal resize lag (#4102)
+
+uncommitted diff stat before handoff commit:
+ docs.works/worklogs/20260512-f7fde755-pumux-tmux-mosh-menu-split.keys.md | 6 ++++++
+ docs.works/worklogs/20260512-f7fde755-pumux-tmux-mosh-menu-split.md      | 15 ++++++++++++---
