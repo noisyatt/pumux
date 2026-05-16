@@ -6423,6 +6423,7 @@ struct ContentView: View {
                 when: { $0.bool(CommandPaletteContextKeys.supportedFileRoutingDisabled) }
             )
         )
+        contributions.append(contentsOf: Self.commandPaletteSettingsToggleCommandContributions())
 
         contributions.append(
             CommandPaletteCommandContribution(
@@ -7264,6 +7265,7 @@ struct ContentView: View {
         registry.register(commandId: "palette.enableSupportedFileRouting") {
             CmdClickSupportedFileRouteSettings.setEnabled(true)
         }
+        registerSettingsToggleCommandHandlers(&registry)
 
         registry.register(commandId: "palette.renameWorkspace") {
             beginRenameWorkspaceFlow()
@@ -9167,10 +9169,21 @@ struct VerticalTabsSidebar: View {
         from oldWorkspaceIds: [UUID],
         to newWorkspaceIds: [UUID]
     ) -> Bool {
-        guard let selectedWorkspaceId = tabManager.selectedTabId else {
-            return false
+        SidebarSelectedWorkspaceScrollPolicy.shouldScrollSelectedWorkspace(
+            selectedWorkspaceId: tabManager.selectedTabId,
+            oldWorkspaceIds: oldWorkspaceIds,
+            newWorkspaceIds: newWorkspaceIds
+        )
+    }
+
+    private func requestSelectedWorkspaceScrollAfterWorkspaceOrderChange(_ notification: Notification) {
+        guard let manager = notification.object as? TabManager, manager === tabManager else {
+            return
         }
-        return !oldWorkspaceIds.contains(selectedWorkspaceId) && newWorkspaceIds.contains(selectedWorkspaceId)
+        guard let selectedWorkspaceId = tabManager.selectedTabId else { return }
+        let movedWorkspaceIds = notification.userInfo?[WorkspaceOrderChangeNotificationKey.movedWorkspaceIds] as? [UUID] ?? []
+        guard movedWorkspaceIds.contains(selectedWorkspaceId) else { return }
+        pendingSelectedWorkspaceScrollId = selectedWorkspaceId
     }
 
     private struct WorkspaceListRenderContext {
@@ -9405,8 +9418,14 @@ struct VerticalTabsSidebar: View {
                     guard shouldRequestSelectedWorkspaceScrollAfterWorkspaceIdsChange(
                         from: oldWorkspaceIds,
                         to: newWorkspaceIds
-                    ) else { return }
+                    ) else {
+                        flushPendingSelectedWorkspaceScroll(scrollProxy)
+                        return
+                    }
                     requestSelectedWorkspaceScroll(scrollProxy, workspaceIds: newWorkspaceIds)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .workspaceOrderDidChange)) { notification in
+                    requestSelectedWorkspaceScrollAfterWorkspaceOrderChange(notification)
                 }
                 .onPreferenceChange(SidebarWorkspaceRowIdsPreferenceKey.self) { rowIds in
                     laidOutWorkspaceRowIds = rowIds
